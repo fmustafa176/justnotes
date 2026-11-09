@@ -34,6 +34,68 @@ class StorageTests(unittest.TestCase):
         self.assertEqual(self.store.load_note(second["id"]), second)
         self.assertEqual(len(self.store.list_notes()), 2)
 
+    def test_delete_removes_primary_and_backup_without_resurrecting_on_restart(self):
+        note = self.store.create_note(text="latest", title="same title")
+        other = self.store.create_note(text="keep", title="same title")
+        archive = self.store.delete_note(note["id"])
+        self.assertEqual(Store(self.root).list_notes(), [other])
+        self.assertFalse((self.root / "notes" / f'{note["id"]}.json').exists())
+        self.assertFalse((self.root / "notes" / f'{note["id"]}.json.bak').exists())
+        self.assertEqual(json.loads((archive / f'{note["id"]}.json').read_text())["text"], "latest")
+        self.assertTrue((archive / f'{note["id"]}.json.bak').exists())
+        with self.assertRaises(StorageError):
+            self.store.load_note(note["id"])
+
+    def test_delete_backup_only_or_corrupt_primary_notes(self):
+        for corrupt in (False, True):
+            note = self.store.create_note(text="recoverable")
+            path = self.root / "notes" / f'{note["id"]}.json'
+            if corrupt:
+                path.write_text("broken")
+            else:
+                path.unlink()
+            archive = self.store.delete_note(note["id"])
+            self.assertEqual(Store(self.root).list_notes(), [])
+            self.assertEqual(json.loads((archive / path.name).read_text())["text"], "recoverable")
+
+    def test_failed_delete_restores_note_and_recovery_copy(self):
+        note = self.store.create_note(text="keep this")
+        path = self.root / "notes" / f'{note["id"]}.json'
+        original_replace = os.replace
+
+        def fail_primary_move(source, destination):
+            if Path(source) == path:
+                raise PermissionError("cannot move note")
+            return original_replace(source, destination)
+
+        with patch("storage.os.replace", side_effect=fail_primary_move):
+            with self.assertRaisesRegex(StorageError, "cannot move note"):
+                self.store.delete_note(note["id"])
+        self.assertEqual(Store(self.root).load_note(note["id"]), note)
+        self.assertTrue(path.with_suffix(".json.bak").exists())
+
+    def test_failed_delete_sync_keeps_note(self):
+        note = self.store.create_note(text="keep this")
+        with patch("storage.os.fsync", side_effect=OSError("I/O error")):
+            with self.assertRaises(StorageError):
+                self.store.delete_note(note["id"])
+        self.assertEqual(Store(self.root).load_note(note["id"]), note)
+
+    def test_late_delete_failure_rolls_back_both_moved_files(self):
+        note = self.store.create_note(text="keep this")
+        from storage import _sync_directory
+
+        def fail_archive_sync(path):
+            if Path(path).parent == self.root / "trash":
+                raise OSError("archive sync failed")
+            return _sync_directory(path)
+
+        with patch("storage._sync_directory", side_effect=fail_archive_sync):
+            with self.assertRaisesRegex(StorageError, "archive sync failed"):
+                self.store.delete_note(note["id"])
+        self.assertEqual(Store(self.root).load_note(note["id"]), note)
+        self.assertTrue((self.root / "notes" / f'{note["id"]}.json.bak').exists())
+
     def test_next_available_default_number(self):
         self.store.create_note(title="note1")
         self.store.create_note(title="note3")
@@ -131,6 +193,28 @@ class StorageTests(unittest.TestCase):
         (self.root / "preferences.json").write_text("broken")
         self.assertEqual(Store(self.root).load_preferences(), preferences)
 
+    def test_window_placement_survives_restart_and_validates_coordinates(self):
+        preferences = self.store.load_preferences()
+        preferences.update(width=950, height=700, geometry_version=1,
+                           x=-1200, y=75, maximized=True)
+        self.store.save_preferences(preferences)
+        self.assertEqual(Store(self.root).load_preferences(), preferences)
+        for invalid in (dict(x="wrong"), dict(y=True), dict(maximized=1), dict(geometry_version=2)):
+            with self.subTest(invalid=invalid), self.assertRaises(StorageError):
+                self.store.save_preferences(dict(preferences, **invalid))
+
+    def test_open_tabs_and_tab_visibility_survive_restart(self):
+        first, second = self.store.create_note(), self.store.create_note()
+        preferences = self.store.load_preferences()
+        preferences.update(open_tabs=[first["id"], second["id"]], last_note=second["id"], always_show_tabs=True)
+        self.store.save_preferences(preferences)
+        self.assertEqual(Store(self.root).load_preferences(), preferences)
+
+    def test_invalid_or_duplicate_tab_ids_are_rejected(self):
+        preferences = self.store.load_preferences()
+        for tabs in (["../elsewhere"], ["a" * 32, "a" * 32], [None], "not a list"):
+            with self.subTest(tabs=tabs), self.assertRaises(StorageError):
+                self.store.save_preferences(dict(preferences, open_tabs=tabs))
     def test_font_preference_defaults_persists_and_resets(self):
         preferences = self.store.load_preferences()
         self.assertIsNone(preferences["font"])

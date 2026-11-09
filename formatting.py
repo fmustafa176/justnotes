@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass
 import re
+from bisect import bisect_right
 
 
 @dataclass(frozen=True)
@@ -19,24 +20,57 @@ class Inline:
         return {1: {"italic"}, 2: {"bold"}, 3: {"bold", "italic"}}[len(self.marker)]
 
 
-_STAR = re.compile(r"(?<![\\*])(\*{1,3})(?!\*)(?=\S)([^\n]*?\S|\S)(?<!\\)\1(?!\*)")
-_STRIKE = re.compile(r"(?<![\\~])(~{1,2})(?!~)(?=\S)([^\n]*?\S|\S)(?<!\\)\1(?!~)")
+_DELIMITERS = re.compile(r"\*+|~+")
 
 
 def inline_runs(text, offset=0):
-    cursor = 0
-    while cursor < len(text):
-        matches = [match for pattern in (_STAR, _STRIKE)
-                   if (match := pattern.search(text, cursor)) is not None]
-        if not matches:
-            break
-        match = min(matches, key=lambda item: item.start())
-        cursor = match.end()
-        if not match[2].strip("*~ \t"):
+    # Index possible closing delimiters once per range. Searching the suffix
+    # afresh for every unmatched opener makes ordinary '*word ' lists quadratic.
+    pending = [(text, offset)]
+    while pending:
+        fragment, base = pending.pop()
+        if isinstance(fragment, Inline):
+            yield fragment
             continue
-        yield Inline(offset + match.start(), offset + match.end(),
-                     offset + match.start(2), offset + match.end(2), match[1])
-        yield from inline_runs(match[2], offset + match.start(2))
+        tokens = list(_DELIMITERS.finditer(fragment))
+        closers = {}
+        for token in tokens:
+            marker = token[0]
+            for size in range(1, min(len(marker), 3 if marker[0] == "*" else 2) + 1):
+                position = token.end() - size
+                if position and not fragment[position - 1].isspace() and fragment[position - 1] != "\\":
+                    closers.setdefault(marker[0] * size, []).append(position)
+        cursor = 0
+        children = []
+        for token in tokens:
+            first, content_start = token.span()
+            marker = token[0]
+            if (first < cursor or len(marker) > (3 if marker[0] == "*" else 2)
+                    or first and fragment[first - 1] == "\\"
+                    or content_start == len(fragment) or fragment[content_start].isspace()):
+                continue
+            positions = closers.get(marker, [])
+            index = bisect_right(positions, content_start)
+            if index == len(positions):
+                continue
+            content_end = positions[index]
+            # Inline formatting cannot cross a line boundary.
+            newline = fragment.find("\n", content_start, content_end)
+            if newline != -1:
+                continue
+            end = content_end + len(marker)
+            cursor = end
+            content = fragment[content_start:content_end]
+            if not content.strip("*~ \t"):
+                continue
+            run = Inline(base + first, base + end, base + content_start, base + content_end, marker)
+            children.append((run, content))
+        # Preserve the original depth-first order without Python recursion.
+        if children:
+            # Jobs distinguish parsed runs from text ranges to keep nesting order.
+            for run, content in reversed(children):
+                pending.append((content, run.content_start))
+                pending.append((run, None))
 
 
 def spans(text):

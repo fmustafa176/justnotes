@@ -22,7 +22,10 @@ class BufferEditor:
                      "text_changed", "restyle", "snapshot", "record_history", "begin_action",
                      "end_action", "undo", "load_editor", "activate_note", "new_note",
                      "apply_format", "close_requested", "open_note", "import_file", "key_pressed",
-                     "set_editor_font", "choose_font", "toggle_markers", "toggle_editor_theme"):
+                     "set_editor_font", "choose_font", "toggle_markers", "toggle_editor_theme", "delete_note",
+                     "cache_current_tab", "update_tab_title", "restore_scroll", "close_tab", "switch_tab",
+                     "request_quit", "request_delete_note", "tab_switched", "schedule_save", "autosave",
+                     "before_insert", "before_delete", "mark_style_dirty"):
             locals()[name] = getattr(Editor, name)
 
     def __init__(self, store):
@@ -30,6 +33,15 @@ class BufferEditor:
         self.note = store.create_note()
         self.preferences = store.load_preferences()
         self.preferences["last_note"] = self.note["id"]
+        self.open_tabs = [self.note["id"]]
+        self.preferences["open_tabs"] = list(self.open_tabs)
+        self.tab_states = {}
+        self.tab_titles = {self.note["id"]: self.note["title"]}
+        self.tab_labels = {}
+        self.scroller = None
+        self.scroll_source = 0
+        self.save_source = 0
+        self.style_dirty = None
         self.loading = False
         self.dirty = False
         self.preferences_dirty = False
@@ -41,13 +53,21 @@ class BufferEditor:
         self.popovers = []
         self.title_entry = Mock()
         self.title_entry.get_text.return_value = self.note["title"]
+        self.title_entry.set_text.side_effect = lambda text: setattr(self.title_entry.get_text, "return_value", text)
         self.view = Mock()
         self.error_bar = Mock()
         self.report = Mock()
         self.apply_appearance = Mock()
+        self.show_notes = Mock()
+        self.refresh_tabs = Mock()
+        self.close = Mock()
+        self.configured = Mock()
         self.buffer = Gtk.TextBuffer()
         for tag in ("bold", "italic", "strikethrough", "marker", *(f"heading{i}" for i in range(1, 7))):
             self.buffer.create_tag(tag)
+        self.marker_tag = self.buffer.get_tag_table().lookup("marker")
+        self.buffer.connect("insert-text", self.before_insert)
+        self.buffer.connect("delete-range", self.before_delete)
         self.buffer.connect("changed", self.text_changed)
         self.buffer.connect("begin-user-action", self.begin_action)
         self.buffer.connect("end-user-action", self.end_action)
@@ -64,19 +84,360 @@ class EditingTests(unittest.TestCase):
         self.addCleanup(self.clear_idle)
 
     def clear_idle(self):
-        if self.editor.style_source:
-            GLib.source_remove(self.editor.style_source)
-            self.editor.style_source = 0
+        for name in ("style_source", "scroll_source", "save_source"):
+            if getattr(self.editor, name):
+                GLib.source_remove(getattr(self.editor, name))
+                setattr(self.editor, name, 0)
 
-    def type_text(self, text):
+    def type_text(self, text, flush=True):
         self.editor.buffer.begin_user_action()
         self.editor.buffer.insert_at_cursor(text)
         self.editor.buffer.end_user_action()
+        if flush:
+            self.editor.flush()
 
-    def test_typing_persists_at_end_of_each_edit(self):
+    def press(self, key, shift=False):
+        event = SimpleNamespace(keyval=Gdk.keyval_from_name(key), state=Gdk.ModifierType.CONTROL_MASK |
+                                (Gdk.ModifierType.SHIFT_MASK if shift else 0))
+        self.assertTrue(self.editor.key_pressed(None, event))
+
+    def test_flush_persists_current_edit(self):
         self.type_text("Hello 🌙")
         self.assertEqual(self.store.load_note(self.editor.note["id"])["text"], "Hello 🌙")
         self.assertFalse(self.editor.dirty)
+
+    def test_typing_burst_coalesces_disk_writes_and_flush_cancels_timer(self):
+        with patch.object(self.store, "save_note", wraps=self.store.save_note) as save:
+            for _ in range(100):
+                previous = self.editor.save_source
+                self.type_text("x", flush=False)
+                if previous:
+                    self.assertEqual(self.editor.save_source, previous)
+            save.assert_not_called()
+            self.assertTrue(self.editor.flush())
+            save.assert_called_once()
+        self.assertEqual(self.editor.save_source, 0)
+        self.assertEqual(self.store.load_note(self.editor.note["id"])["text"], "x" * 100)
+
+    def test_autosave_timer_writes_without_navigation(self):
+        import time
+        self.type_text("autosaved", flush=False)
+        deadline = time.monotonic() + 1.5
+        while self.editor.dirty and time.monotonic() < deadline:
+            GLib.MainContext.default().iteration(False)
+            time.sleep(.005)
+        self.assertFalse(self.editor.dirty)
+        self.assertEqual(self.editor.save_source, 0)
+        self.assertEqual(self.store.load_note(self.editor.note["id"])["text"], "autosaved")
+
+    def test_editing_back_to_saved_text_avoids_rewriting_file(self):
+        self.type_text("x", flush=False)
+        self.editor.buffer.delete(*self.editor.buffer.get_bounds())
+        with patch.object(self.store, "save_note", wraps=self.store.save_note) as save:
+            self.assertTrue(self.editor.flush())
+            save.assert_not_called()
+        self.assertFalse(self.editor.dirty)
+
+    def test_pending_autosave_is_saved_before_switching_and_quitting(self):
+        original = self.editor.note["id"]
+        other = self.store.create_note()
+        self.type_text("pending first", flush=False)
+        self.assertTrue(self.editor.open_note(other["id"]))
+        self.assertEqual(self.store.load_note(original)["text"], "pending first")
+        self.type_text("pending second", flush=False)
+        self.assertTrue(self.editor.request_quit())
+        self.assertEqual(self.store.load_note(other["id"])["text"], "pending second")
+        self.assertEqual(self.editor.save_source, 0)
+
+    def test_small_edit_only_parses_affected_line(self):
+        self.type_text("**bold**\n" * 3000 + "last", flush=False)
+        self.clear_idle()
+        self.editor.restyle(full=True)
+        self.editor.buffer.place_cursor(self.editor.buffer.get_end_iter())
+        self.type_text(" word", flush=False)
+        from formatting import spans
+        with patch("app.spans", wraps=spans) as parse:
+            self.clear_idle()
+            self.editor.restyle()
+        parse.assert_called_once_with("last word")
+
+    def test_incremental_styling_matches_full_styling_across_edits(self):
+        import random
+        generator = random.Random(74)
+        self.type_text("# Title\n**bold** and *italic*\n~~gone~~\nplain 🌙", flush=False)
+        self.clear_idle()
+        self.editor.restyle(full=True)
+        reference = Gtk.TextBuffer()
+        names = ("bold", "italic", "strikethrough", "marker", *(f"heading{i}" for i in range(1, 7)))
+        for name in names:
+            reference.create_tag(name)
+        expected = SimpleNamespace(buffer=reference, preferences=self.editor.preferences,
+                                   marker_tag=reference.get_tag_table().lookup("marker"), style_dirty=None)
+        for _ in range(100):
+            length = self.editor.buffer.get_char_count()
+            position = generator.randrange(length + 1)
+            self.editor.buffer.begin_user_action()
+            if generator.randrange(2) and position < length:
+                end = min(length, position + generator.randrange(1, 6))
+                self.editor.buffer.delete(self.editor.buffer.get_iter_at_offset(position),
+                                          self.editor.buffer.get_iter_at_offset(end))
+            else:
+                self.editor.buffer.insert(self.editor.buffer.get_iter_at_offset(position),
+                                          generator.choice(("**", "*", "# ", "~", "\n", "a 🌙")))
+            self.editor.buffer.end_user_action()
+            self.clear_idle()
+            self.editor.restyle()
+            reference.set_text(self.editor.text())
+            Editor.restyle(expected, full=True)
+            for index in range(self.editor.buffer.get_char_count()):
+                actual_iter = self.editor.buffer.get_iter_at_offset(index)
+                expected_iter = reference.get_iter_at_offset(index)
+                for name in names:
+                    self.assertEqual(actual_iter.has_tag(self.editor.buffer.get_tag_table().lookup(name)),
+                                     expected_iter.has_tag(reference.get_tag_table().lookup(name)),
+                                     (self.editor.text(), index, name))
+
+    def test_undo_history_is_bounded_and_retains_recent_undo(self):
+        from app import history_bytes, HISTORY_BYTES
+        self.type_text("a" * 60000, flush=False)
+        for _ in range(80):
+            self.type_text("x", flush=False)
+        self.assertLessEqual(history_bytes(self.editor.history), HISTORY_BYTES)
+        self.assertLess(len(self.editor.history), 80)
+        before = self.editor.text()
+        self.editor.undo()
+        self.assertEqual(self.editor.text(), before[:-1])
+        self.editor.undo(redo=True)
+        self.assertEqual(self.editor.text(), before)
+
+    def test_switching_transfers_history_ownership_and_evicts_old_cache(self):
+        from app import history_bytes
+        original = self.editor.note["id"]
+        self.type_text("first", flush=False)
+        second = self.store.create_note(text="second")
+        self.editor.open_note(second["id"])
+        self.assertNotIn(second["id"], self.editor.tab_states)
+        self.editor.open_note(original)
+        self.assertNotIn(original, self.editor.tab_states)
+        with patch("app.TAB_CACHE_BYTES", 900):
+            for _ in range(6):
+                note = self.store.create_note(text="n" * 100)
+                self.editor.open_note(note["id"])
+            self.assertLessEqual(sum(history_bytes(s["history"]) for s in self.editor.tab_states.values()), 900)
+            self.assertNotIn(original, self.editor.tab_states)
+        self.editor.open_note(original)
+        self.assertEqual(self.editor.text(), "first")
+
+    def test_open_notes_become_unique_persisted_tabs(self):
+        first = self.editor.note["id"]
+        second = self.store.create_note(title="second", text="other")
+        self.assertTrue(self.editor.open_note(second["id"]))
+        self.assertTrue(self.editor.open_note(second["id"]))
+        self.assertEqual(self.editor.open_tabs, [first, second["id"]])
+        self.assertEqual(Store(self.store.root).load_preferences()["open_tabs"], self.editor.open_tabs)
+        self.assertEqual(Store(self.store.root).load_preferences()["last_note"], second["id"])
+
+    def test_tabs_keep_independent_undo_redo_and_cursor(self):
+        self.type_text("first")
+        self.type_text(" second")
+        first = self.editor.note["id"]
+        self.editor.buffer.place_cursor(self.editor.buffer.get_iter_at_offset(3))
+        other = self.store.create_note(title="other", text="other")
+        self.editor.open_note(other["id"])
+        self.editor.buffer.place_cursor(self.editor.buffer.get_end_iter())
+        self.type_text(" changed")
+        self.editor.open_note(first)
+        self.assertEqual(self.editor.text(), "first second")
+        self.assertEqual(self.editor.buffer.get_iter_at_mark(self.editor.buffer.get_insert()).get_offset(), 3)
+        self.editor.undo()
+        self.assertEqual(self.editor.text(), "first")
+        self.assertEqual(self.store.load_note(other["id"])["text"], "other changed")
+        self.editor.open_note(other["id"])
+        self.editor.undo()
+        self.assertEqual(self.editor.text(), "other")
+        self.editor.open_note(first)
+        self.editor.undo(redo=True)
+        self.assertEqual(self.editor.text(), "first second")
+
+    def test_closing_active_or_inactive_tabs_never_deletes_notes(self):
+        first = self.editor.note["id"]
+        other = self.store.create_note(title="other", text="saved")
+        self.editor.open_note(other["id"])
+        self.assertTrue(self.editor.close_tab(other["id"]))
+        self.assertEqual(self.editor.note["id"], first)
+        self.assertEqual(self.editor.open_tabs, [first])
+        self.assertEqual(self.store.load_note(other["id"])["text"], "saved")
+        self.editor.open_note(other["id"])
+        self.editor.open_note(first)
+        self.assertTrue(self.editor.close_tab(other["id"]))
+        self.assertEqual(self.editor.note["id"], first)
+        self.assertEqual(len(self.store.list_notes()), 2)
+
+    def test_deleting_open_note_removes_its_tab(self):
+        first = self.editor.note["id"]
+        other = self.store.create_note(title="other")
+        self.editor.open_note(other["id"])
+        self.editor.delete_note(other["id"])
+        self.assertEqual(self.editor.open_tabs, [first])
+        self.assertEqual(Store(self.store.root).load_preferences()["open_tabs"], [first])
+
+    def test_failed_tab_preference_write_keeps_current_editor_and_tabs(self):
+        self.type_text("keep this")
+        original = self.editor.note["id"]
+        other = self.store.create_note(title="other")
+        with patch.object(self.store, "save_preferences", side_effect=StorageError("disk full")):
+            self.assertFalse(self.editor.open_note(other["id"]))
+        self.assertEqual(self.editor.open_tabs, [original])
+        self.assertEqual(self.editor.note["id"], original)
+        self.assertEqual(self.editor.text(), "keep this")
+
+    def test_failed_save_blocks_tab_closing(self):
+        original = self.editor.note["id"]
+        other = self.store.create_note()
+        self.editor.open_note(other["id"])
+        self.type_text("unsaved edit", flush=False)
+        with patch.object(self.store, "save_note", side_effect=StorageError("disk full")):
+            self.assertFalse(self.editor.close_tab(other["id"]))
+        self.assertEqual(self.editor.open_tabs, [original, other["id"]])
+        self.assertEqual(self.editor.note["id"], other["id"])
+
+    def test_failed_notebook_switch_restores_selected_tab(self):
+        original = self.editor.note["id"]
+        other = self.store.create_note()
+        page1, page2 = object(), object()
+        self.editor.tab_pages = {original: page1, other["id"]: page2}
+        self.editor.syncing_tabs = False
+        notebook = Mock()
+        notebook.page_num.return_value = 0
+        with patch.object(self.editor, "open_note", return_value=False):
+            self.editor.tab_switched(notebook, page2, 1)
+        notebook.set_current_page.assert_called_once_with(0)
+        self.assertFalse(self.editor.syncing_tabs)
+
+    def test_tab_keyboard_shortcuts_and_ctrl_q(self):
+        original = self.editor.note["id"]
+        other = self.store.create_note()
+        self.editor.open_note(other["id"])
+        self.press("Tab")
+        self.assertEqual(self.editor.note["id"], original)
+        self.press("ISO_Left_Tab", shift=True)
+        self.assertEqual(self.editor.note["id"], other["id"])
+        self.press("w")
+        self.assertEqual(self.editor.open_tabs, [original])
+        self.assertEqual(len(self.store.list_notes()), 2)
+        self.press("q")
+        self.editor.close.assert_called_once()
+
+    def test_ctrl_q_does_not_close_if_saving_fails(self):
+        with patch.object(self.store, "save_note", side_effect=StorageError("disk full")):
+            self.type_text("do not lose this")
+            self.press("q")
+            self.editor.close.assert_not_called()
+        self.press("q")
+        self.editor.close.assert_called_once()
+        self.assertEqual(self.store.load_note(self.editor.note["id"])["text"], "do not lose this")
+
+    def test_delete_confirmation_cancel_keeps_note(self):
+        original = self.editor.note["id"]
+        dialog = Mock()
+        dialog.run.return_value = Gtk.ResponseType.CANCEL
+        with patch("app.Gtk.MessageDialog", return_value=dialog), patch.object(self.editor, "delete_note") as delete:
+            self.assertFalse(self.editor.request_delete_note(original))
+            delete.assert_not_called()
+        dialog.set_default_response.assert_called_once_with(Gtk.ResponseType.CANCEL)
+        dialog.destroy.assert_called_once()
+        self.assertEqual(len(self.store.list_notes()), 1)
+
+    def test_delete_confirmation_accept_deletes_exact_note(self):
+        original = self.editor.note["id"]
+        dialog = Mock()
+        dialog.run.return_value = Gtk.ResponseType.ACCEPT
+        with patch("app.Gtk.MessageDialog", return_value=dialog):
+            self.assertTrue(self.editor.request_delete_note(original))
+        with self.assertRaises(StorageError):
+            self.store.load_note(original)
+        self.assertEqual(len(self.store.list_notes()), 1)  # Fresh blank replacement.
+
+    def test_delete_confirmation_is_not_shown_if_saving_fails(self):
+        self.type_text("unsaved edit", flush=False)
+        with patch.object(self.store, "save_note", side_effect=StorageError("disk full")), \
+                patch("app.Gtk.MessageDialog") as dialog:
+            self.assertFalse(self.editor.request_delete_note(self.editor.note["id"]))
+            dialog.assert_not_called()
+        self.assertEqual(len(self.store.list_notes()), 1)
+
+    def test_delete_inactive_note_keeps_current_editor(self):
+        self.type_text("keep editing")
+        other = self.store.create_note(text="remove this")
+        current = self.editor.note["id"]
+        self.assertTrue(self.editor.delete_note(other["id"]))
+        self.assertEqual(self.editor.note["id"], current)
+        self.assertEqual(self.editor.text(), "keep editing")
+        self.assertEqual(len(Store(self.store.root).list_notes()), 1)
+        self.editor.show_notes.assert_called_once()
+
+    def test_delete_active_note_opens_remaining_note_and_remembers_it(self):
+        original = self.editor.note["id"]
+        other = self.store.create_note(text="remaining", title="other")
+        self.assertTrue(self.editor.delete_note(original))
+        self.assertEqual(self.editor.note["id"], other["id"])
+        self.assertEqual(self.editor.text(), "remaining")
+        self.assertEqual(Store(self.store.root).load_preferences()["last_note"], other["id"])
+        self.assertEqual(len(Store(self.store.root).list_notes()), 1)
+
+    def test_delete_last_note_creates_a_persisted_blank_note(self):
+        original = self.editor.note["id"]
+        self.assertTrue(self.editor.delete_note(original))
+        self.assertNotEqual(self.editor.note["id"], original)
+        self.assertEqual(self.editor.text(), "")
+        self.assertEqual(self.editor.note["title"], "note1")
+        self.assertEqual(Store(self.store.root).list_notes(), [self.editor.note])
+        self.assertEqual(Store(self.store.root).load_preferences()["last_note"], self.editor.note["id"])
+
+    def test_delete_failure_keeps_editor_and_active_note(self):
+        self.type_text("keep this text")
+        original = self.editor.note["id"]
+        self.store.create_note(text="other")
+        with patch.object(self.store, "delete_note", side_effect=StorageError("cannot delete")):
+            self.assertFalse(self.editor.delete_note(original))
+        self.assertEqual(self.editor.note["id"], original)
+        self.assertEqual(self.editor.text(), "keep this text")
+        self.assertEqual(len(Store(self.store.root).list_notes()), 2)
+        self.assertTrue(self.editor.flush())
+        self.assertEqual(Store(self.store.root).load_preferences()["last_note"], original)
+
+    def test_failed_last_note_deletion_cleans_up_its_placeholder(self):
+        original = self.editor.note["id"]
+        actual_delete = self.store.delete_note
+
+        def fail_original(note_id):
+            if note_id == original:
+                raise StorageError("cannot delete original")
+            return actual_delete(note_id)
+
+        with patch.object(self.store, "delete_note", side_effect=fail_original):
+            self.assertFalse(self.editor.delete_note(original))
+        self.assertEqual([note["id"] for note in self.store.list_notes()], [original])
+        self.assertEqual(self.editor.note["id"], original)
+
+    def test_delete_stops_if_current_changes_cannot_save(self):
+        other = self.store.create_note(text="other")
+        self.type_text("unsaved edit", flush=False)
+        with patch.object(self.store, "save_note", side_effect=StorageError("disk full")), \
+                patch.object(self.store, "delete_note") as delete:
+            self.assertFalse(self.editor.delete_note(other["id"]))
+            delete.assert_not_called()
+        self.assertEqual(len(self.store.list_notes()), 2)
+
+    def test_delete_stops_if_replacement_preference_cannot_save(self):
+        original = self.editor.note["id"]
+        self.store.create_note(text="other")
+        with patch.object(self.store, "save_preferences", side_effect=StorageError("disk full")), \
+                patch.object(self.store, "delete_note") as delete:
+            self.assertFalse(self.editor.delete_note(original))
+            delete.assert_not_called()
+        self.assertEqual(self.editor.note["id"], original)
+        self.assertEqual(len(self.store.list_notes()), 2)
 
     def test_undo_redo_and_branch_persist(self):
         self.type_text("first")
@@ -197,6 +558,7 @@ class EditingTests(unittest.TestCase):
     def test_title_changes_persist(self):
         self.editor.title_entry.get_text.return_value = "new title 🌿"
         self.editor.title_changed()
+        self.editor.flush()
         self.assertEqual(self.store.load_note(self.editor.note["id"])["title"], "new title 🌿")
 
     def test_font_change_preserves_text_and_undo_history_and_can_reset(self):
@@ -313,7 +675,59 @@ class WindowTests(unittest.TestCase):
                 window.buffer.insert_at_cursor("hello **world**")
                 window.buffer.end_user_action()
                 window.title_entry.set_text("renamed")
+                self.assertEqual(window.title_entry.get_tooltip_text(), "Title")
+                self.assertEqual(window.notes_button.get_tooltip_text(), "Notes")
+                extra = store.create_note(title="temporary", text="remove this")
                 window.show_notes()
+                def descendants(widget):
+                    yield widget
+                    if isinstance(widget, Gtk.Container):
+                        for child in widget.get_children():
+                            yield from descendants(child)
+                deletes = [widget for widget in descendants(window.popovers[0])
+                           if isinstance(widget, Gtk.Button) and widget.get_tooltip_text() == "Delete"]
+                self.assertEqual(len(deletes), 2)
+                delete = next(button for button in deletes if button.get_accessible().get_name() == "Delete temporary")
+                color = delete.get_style_context().get_color(Gtk.StateFlags.NORMAL)
+                self.assertGreater(color.red, color.green * 2)
+                confirmation = Mock()
+                confirmation.run.return_value = Gtk.ResponseType.ACCEPT
+                with patch("app.Gtk.MessageDialog", return_value=confirmation):
+                    delete.clicked()
+                with self.assertRaises(StorageError):
+                    store.load_note(extra["id"])
+                self.assertEqual(window.text(), "hello **world**")
+                original = window.note["id"]
+                self.assertFalse(window.notebook.get_show_tabs())
+                window.new_note()
+                second = window.note["id"]
+                self.assertEqual(window.notebook.get_n_pages(), 2)
+                self.assertFalse(window.notebook.get_show_tabs())
+                self.assertEqual(window.title_entry.get_parent(), window.tab_widgets[second])
+                self.assertFalse(window.tab_labels[second].get_visible())
+                self.assertTrue(window.tab_labels[original].get_visible())
+                # First click selects an inactive title and leaves focus in the editor.
+                window.tab_labels[original].clicked()
+                self.assertEqual(window.note["id"], original)
+                self.assertFalse(window.title_entry.has_focus())
+                self.assertEqual(window.title_entry.get_parent(), window.tab_widgets[original])
+                window.notebook.set_current_page(0)
+                self.assertEqual(window.note["id"], original)
+                self.assertEqual(window.text(), "hello **world**")
+                self.assertEqual(window.overlay.get_parent(), window.tab_pages[original])
+                window.close_tab(second)
+                self.assertEqual(window.notebook.get_n_pages(), 1)
+                self.assertFalse(window.notebook.get_show_tabs())
+                self.assertEqual(store.load_note(second)["text"], "")
+                window.open_note(second)
+                reopened = Editor(application, store)
+                try:
+                    self.assertEqual(reopened.open_tabs, [original, second])
+                    self.assertEqual(reopened.note["id"], second)
+                    self.assertEqual(reopened.notebook.get_n_pages(), 2)
+                finally:
+                    reopened.destroy()
+                window.open_note(original)
                 window.show_formatting()
                 window.show_info()
                 self.assertIsInstance(window.get_titlebar(), Gtk.HeaderBar)
@@ -344,3 +758,82 @@ class WindowTests(unittest.TestCase):
                 self.assertFalse(window.close_requested())
             finally:
                 window.destroy()
+
+
+@unittest.skipIf(Editor is None, "System GTK is unavailable")
+class GeometryControllerTests(unittest.TestCase):
+    def window(self, state=0, can_position=True):
+        return SimpleNamespace(
+            preferences=dict(width=900, height=600, x=50, y=60),
+            get_mapped=Mock(return_value=True),
+            get_window=Mock(return_value=SimpleNamespace(get_state=lambda: state)),
+            get_size=Mock(return_value=(950, 700)),
+            get_position=Mock(return_value=(-1200, 75)),
+            can_position=can_position, geometry_source=0, save_geometry=Mock())
+
+    def test_capture_uses_restorable_size_instead_of_raw_event_dimensions(self):
+        window = self.window()
+        with patch("app.GLib.timeout_add", return_value=17):
+            Editor.configured(window, window, SimpleNamespace(width=980, height=748))
+        self.assertEqual((window.preferences["width"], window.preferences["height"]), (950, 700))
+        self.assertEqual((window.preferences["x"], window.preferences["y"]), (-1200, 75))
+        self.assertEqual(window.preferences["geometry_version"], 1)
+        self.assertTrue(window.preferences_dirty)
+
+    def test_identical_configure_does_not_reschedule_disk_write(self):
+        window = self.window()
+        with patch("app.GLib.timeout_add", return_value=17) as schedule:
+            Editor.configured(window)
+            Editor.configured(window)
+        schedule.assert_called_once()
+
+    def test_maximized_and_fullscreen_keep_normal_geometry(self):
+        for state in (Gdk.WindowState.MAXIMIZED, Gdk.WindowState.FULLSCREEN, Gdk.WindowState.ICONIFIED):
+            window = self.window(state)
+            with patch("app.GLib.timeout_add", return_value=17):
+                Editor.configured(window)
+            self.assertEqual((window.preferences["width"], window.preferences["height"]), (900, 600))
+            window.get_size.assert_not_called()
+        window = self.window(Gdk.WindowState.MAXIMIZED)
+        with patch("app.GLib.timeout_add", return_value=17):
+            Editor.configured(window)
+        self.assertTrue(window.preferences["maximized"])
+
+    def test_unmapped_window_does_not_overwrite_saved_geometry(self):
+        window = self.window()
+        window.get_mapped.return_value = False
+        Editor.configured(window)
+        window.get_size.assert_not_called()
+
+    def test_wayland_does_not_save_meaningless_global_position(self):
+        window = self.window(can_position=False)
+        with patch("app.GLib.timeout_add", return_value=17):
+            Editor.configured(window)
+        window.get_position.assert_not_called()
+        self.assertEqual((window.preferences["x"], window.preferences["y"]), (50, 60))
+
+
+@unittest.skipIf(Editor is None, "System GTK is unavailable")
+class LifecycleTests(unittest.TestCase):
+    def test_destroy_releases_timers_signals_popovers_and_cached_history(self):
+        window = SimpleNamespace(
+            titlebar_background=Mock(), system_theme=Mock(), geometry_source=10, style_source=11,
+            scroll_source=12, save_source=13, recovery_source=14,
+            popovers=[Mock()], style_dirty=(object(), object()),
+            buffer=Mock(), buffer_handlers=[21, 22, 23],
+            tab_states={"note": {"history": ["big text"]}}, history=["text"],
+            tab_pages={"note": Mock()}, tab_labels={"note": Mock()}, tab_widgets={"note": Mock()},
+            get_screen=Mock(), css=Mock())
+        popover = window.popovers[0]
+        with patch("app.GLib.source_remove") as remove, \
+                patch("app.Gtk.StyleContext.remove_provider_for_screen") as remove_css:
+            Editor.destroyed(window)
+        self.assertEqual([call.args[0] for call in remove.call_args_list], [10, 11, 12, 13, 14])
+        self.assertEqual(window.buffer.disconnect.call_count, 3)
+        self.assertEqual(window.buffer.delete_mark.call_count, 2)
+        self.assertIsNone(window.style_dirty)
+        popover.destroy.assert_called_once()
+        self.assertFalse(window.tab_states)
+        self.assertFalse(window.history)
+        self.assertFalse(window.buffer_handlers)
+        remove_css.assert_called_once()

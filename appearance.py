@@ -70,11 +70,27 @@ def stylesheet(editor_theme="light"):
     }
     .editor-surface button.chrome-button { color: %(muted)s; }
     .editor-surface button.chrome-button:hover { color: %(foreground)s; }
+    .editor-surface .title-tab {
+        border-bottom: 2px solid transparent;
+    }
+    .editor-surface .title-tab.active {
+        border-bottom-color: %(accent)s;
+    }
+    .editor-surface .title-tab > button {
+        color: %(muted)s; background: transparent; box-shadow: none;
+        border: none; padding: 0 8px; min-width: 0;
+    }
+    .editor-surface .title-tab > entry { padding: 0 8px; min-width: 0; }
+    .editor-surface .title-tab button.close-tab {
+        color: %(muted)s; padding: 0; min-width: 20px; min-height: 20px;
+    }
     .editor-surface textview text selection, .editor-surface entry.note-title selection {
         background-color: %(selection)s; color: %(foreground)s;
     }
     """ % colors
     return editor + """
+    .justnotes-surface button.delete-note, .justnotes-surface button.delete-note image { color: #e53935; }
+    .justnotes-surface button.delete-note:hover { background-color: rgba(229,57,53,0.12); }
     .justnotes-window entry.note-title { font-weight: 600; }
     .justnotes-window button.chrome-button {
         min-width: 36px; min-height: 36px; padding: 0;
@@ -90,3 +106,27 @@ def stylesheet(editor_theme="light"):
     .justnotes-surface .about-title { font-weight: bold; }
     .justnotes-surface .info-footer { padding: 4px; }
     """
+
+
+def tab_width(available, count, minimum=140):
+    """Share the title row evenly, then overflow horizontally at the minimum."""
+    return max(minimum, available // max(1, count))
+
+
+def window_geometry(preferences, workareas):
+    """Restore normal geometry on an available monitor, or use a roomy first size."""
+    primary = workareas[0]
+    saved = preferences.get("geometry_version") == 1
+    x, y = preferences.get("x"), preferences.get("y")
+    area = next((area for area in workareas if x is not None and y is not None
+                 and area[0] <= x < area[0] + area[2]
+                 and area[1] <= y < area[1] + area[3]), primary)
+    left, top, screen_width, screen_height = area
+    width = preferences["width"] if saved else round(screen_width * .56)
+    height = preferences["height"] if saved else round(screen_height * .56)
+    width = min(max(360, width), screen_width)
+    height = min(max(280, height), max(280, screen_height - 48))
+    x = x if saved and x is not None else left + round(screen_width * .09)
+    y = y if saved and y is not None else top + round(screen_height * .10)
+    return width, height, max(left, min(x, left + screen_width - width)), max(
+        top, min(y, top + screen_height - height - 48))

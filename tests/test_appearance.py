@@ -66,3 +66,34 @@ class NativeAppearanceTests(unittest.TestCase):
                 font = context.load_font(description)
                 self.assertEqual(font.describe().get_family(), expected)
                 self.assertEqual(font.describe().get_style(), description.get_style())
+
+
+class LayoutTests(unittest.TestCase):
+    def test_tabs_share_width_until_minimum_then_scroll(self):
+        from appearance import tab_width
+        self.assertEqual([tab_width(600, n) for n in (1, 2, 3, 4, 5)], [600, 300, 200, 150, 140])
+        self.assertGreater(tab_width(600, 5) * 5, 600)
+        self.assertEqual(tab_width(80, 1), 140)
+
+    def test_first_window_uses_just_over_quarter_of_screen_and_offset(self):
+        from appearance import window_geometry
+        geometry = window_geometry(dict(width=360, height=280), [(0, 24, 1920, 1056)])
+        width, height, x, y = geometry
+        self.assertGreater(width * height / (1920 * 1056), .25)
+        self.assertLess(width * height / (1920 * 1056), .35)
+        self.assertEqual((x, y), (173, 130))
+
+    def test_saved_geometry_is_stable_including_negative_monitor_positions(self):
+        from appearance import window_geometry
+        prefs = dict(geometry_version=1, width=850, height=650, x=-1600, y=100)
+        areas = [(0, 0, 1920, 1080), (-1920, 0, 1920, 1080)]
+        for _ in range(20):
+            result = window_geometry(prefs, areas)
+            self.assertEqual(result, (850, 650, -1600, 100))
+            prefs.update(zip(("width", "height", "x", "y"), result))
+
+    def test_removed_monitor_and_oversized_window_stay_on_screen(self):
+        from appearance import window_geometry
+        result = window_geometry(dict(geometry_version=1, width=3000, height=2000, x=3000, y=1500),
+                                 [(0, 24, 1280, 696)])
+        self.assertEqual(result, (1280, 648, 0, 24))

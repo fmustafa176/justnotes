@@ -77,3 +77,19 @@ class FormattingTests(unittest.TestCase):
     def test_same_heading_level_toggles_off_and_other_level_replaces_it(self):
         self.assertEqual(heading_edit("## One\n## Two", 0, 13, 2), (0, 13, "One\nTwo"))
         self.assertEqual(heading_edit("## One\n## Two", 0, 13, 1), (0, 13, "# One\n# Two"))
+
+
+class ParserRegressionTests(unittest.TestCase):
+    def test_many_unclosed_delimiters_stay_literal(self):
+        self.assertEqual(list(spans("*word " * 10000)), [])
+        self.assertEqual(list(spans("~word " * 10000)), [])
+
+    def test_long_runs_and_nested_closing_suffixes(self):
+        self.assertIn(("italic", 1, 5), list(spans("*a****")))
+        found = list(spans("**bold *italic***"))
+        self.assertIn(("bold", 2, 15), found)
+        self.assertIn(("italic", 8, 14), found)
+
+    def test_inline_spans_do_not_cross_lines(self):
+        found = list(spans("*unfinished\nword*\n**yes**\n~no\nstrike~"))
+        self.assertEqual([tag for tag, _, _ in found if tag != "marker"], ["bold"])

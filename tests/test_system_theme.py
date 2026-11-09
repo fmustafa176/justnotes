@@ -65,10 +65,14 @@ class SystemThemeTests(unittest.TestCase):
 
     def test_close_cancels_pending_work_and_ignores_later_updates(self):
         watcher = self.watcher()
+        callback = watcher.changed
+        watcher.close()
         watcher.close()
         watcher.cancel.cancel.assert_called_once()
         watcher.set_scheme(1)
-        watcher.changed.assert_not_called()
+        callback.assert_not_called()
+        self.assertIsNone(watcher.changed)
+        self.assertIsNone(watcher.proxy)
 
 
 @unittest.skipIf(SystemTheme is None, "System PyGObject is unavailable")
@@ -121,3 +125,6 @@ class TitlebarBackgroundTests(unittest.TestCase):
             self.effect.close()
             remove.assert_called_once_with(42)
         self.assertEqual(self.titlebar.get_settings().disconnect.call_count, 2)
+        self.assertEqual(self.titlebar.disconnect.call_count, 3)
+        self.effect.close()
+        self.assertEqual(self.titlebar.disconnect.call_count, 3)

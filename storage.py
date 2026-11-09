@@ -13,6 +13,14 @@ class StorageError(Exception):
     """An operation failed without discarding the caller's editor state."""
 
 
+def _sync_directory(path):
+    descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
 class Store:
     def __init__(self, root=None, lock=False):
         base = Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local/share")
@@ -50,6 +58,15 @@ class Store:
     def _preferences(value):
         return (isinstance(value, dict) and value.get("version") == 1
                 and value.get("editor_theme", "light") in ("light", "dark")
+                and isinstance(value.get("maximized", False), bool)
+                and (value.get("geometry_version") is None or value["geometry_version"] == 1)
+                and all(value.get(key) is None or type(value[key]) is int
+                        and -100000 <= value[key] <= 100000 for key in ("x", "y"))
+                and isinstance(value.get("always_show_tabs", False), bool)
+                and isinstance(value.get("open_tabs", []), list)
+                and all(isinstance(key, str) and re.fullmatch(r"[0-9a-f]{32}", key)
+                        for key in value.get("open_tabs", []))
+                and len(value.get("open_tabs", [])) == len(set(value.get("open_tabs", [])))
                 and isinstance(value.get("hide_markers", True), bool)
                 and (value.get("font") is None or
                      isinstance(value["font"], str) and 0 < len(value["font"]) <= 512
@@ -94,11 +111,7 @@ class Store:
                 os.fsync(stream.fileno())
             os.replace(temporary, path)
             temporary = None
-            descriptor = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
-            try:
-                os.fsync(descriptor)
-            finally:
-                os.close(descriptor)
+            _sync_directory(path.parent)
         finally:
             if temporary is not None:
                 temporary.unlink(missing_ok=True)
@@ -148,6 +161,47 @@ class Store:
     def save_note(self, note):
         self._save(self._path(note.get("id")), note, self._note)
 
+    def delete_note(self, note_id):
+        """Archive both versions together; a backup must not resurrect a note."""
+        path = self._path(note_id)
+        note = self.load_note(note_id)
+        # A crash between moving the backup and primary must leave a valid
+        # primary. Repair a recovered or backup-only note before moving it.
+        try:
+            self._read(path, self._note)
+        except (OSError, ValueError):
+            self.save_note(note)
+        trash = self.root / "trash"
+        archive = trash / f"{note_id}-{uuid.uuid4().hex}"
+        moved = []
+        try:
+            trash.mkdir(mode=0o700, exist_ok=True)
+            archive.mkdir(mode=0o700)
+            _sync_directory(self.root)
+            _sync_directory(trash)
+            for original in (path.with_suffix(".json.bak"), path):
+                if original.exists():
+                    destination = archive / original.name
+                    os.replace(original, destination)
+                    moved.append((original, destination))
+            _sync_directory(archive)
+            _sync_directory(self.notes_dir)
+            return archive
+        except OSError as exc:
+            rollback_failed = False
+            for original, destination in reversed(moved):
+                try:
+                    os.replace(destination, original)
+                except OSError:
+                    rollback_failed = True
+            try:
+                _sync_directory(self.notes_dir)
+                archive.rmdir()
+            except OSError:
+                pass
+            recovery = f" Copies are kept in {archive}." if rollback_failed else ""
+            raise StorageError(f"Could not delete note: {exc}.{recovery}") from exc
+
     def note_modified(self, note_id):
         path = self._path(note_id)
         try:
@@ -172,12 +226,14 @@ class Store:
         path = self.root / "preferences.json"
         if not path.exists() and not path.with_suffix(".json.bak").exists():
             return dict(version=1, editor_theme="light", width=960, height=600, last_note=None, font=None,
-                        hide_markers=True)
+                        hide_markers=True, open_tabs=[], always_show_tabs=False)
         preferences = self._load(path, self._preferences)
         legacy_theme = preferences.pop("theme", None)
         preferences.setdefault("editor_theme", legacy_theme if legacy_theme in ("light", "dark") else "light")
         preferences.setdefault("font", None)
         preferences.setdefault("hide_markers", True)
+        preferences.setdefault("open_tabs", [])
+        preferences.setdefault("always_show_tabs", False)
         return preferences
 
     def save_preferences(self, preferences):

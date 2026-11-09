@@ -72,12 +72,16 @@ class SystemTheme:
             self.changed()
 
     def close(self):
+        if self.closed:
+            return
         self.closed = True
         self.cancel.cancel()
         if self.proxy:
             for handler in self.handlers:
                 self.proxy.disconnect(handler)
         self.handlers.clear()
+        self.proxy = None
+        self.changed = None
 
 
 def follow_system(settings, system_dark=None):
@@ -106,9 +110,11 @@ class TitlebarBackground:
             self.settings.connect("notify::gtk-theme-name", self.schedule),
             self.settings.connect("notify::gtk-application-prefer-dark-theme", self.schedule),
         ]
-        titlebar.connect("style-updated", self.schedule)
-        titlebar.connect("state-flags-changed", self.schedule)
-        titlebar.connect("destroy", self.close)
+        self.titlebar_handlers = [
+            titlebar.connect("style-updated", self.schedule),
+            titlebar.connect("state-flags-changed", self.schedule),
+            titlebar.connect("destroy", self.close),
+        ]
         self.refresh()
 
     def schedule(self, *_):
@@ -153,4 +159,7 @@ class TitlebarBackground:
         for handler in self.settings_handlers:
             self.settings.disconnect(handler)
         self.settings_handlers.clear()
+        for handler in self.titlebar_handlers:
+            self.titlebar.disconnect(handler)
+        self.titlebar_handlers.clear()
         self.context.remove_provider(self.provider)
