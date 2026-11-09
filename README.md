@@ -1,7 +1,8 @@
 # justnotes
 
-A small Linux notes app by nightfury. Just write—your notes save automatically
-on your computer. Includes basic Markdown, light/dark themes, and a font chooser.
+A small Linux notes app I made for myself cuz everything I tried looked so extra.
+Just write—your notes save automatically on your computer. Includes basic Markdown,
+light/dark themes, and a font chooser.
 
 ## Install
 
@@ -22,5 +23,3 @@ Use **Notes** to create or import notes and **Aa** for formatting and fonts.
 Notes live in `~/.local/share/justnotes/notes/` (or `$XDG_DATA_HOME/justnotes/notes/`).
 Updating or reinstalling the app keeps them. Bundled font licenses are in
 `assets/fonts/LICENSE.txt`.
-
-Tests: `/usr/bin/python3 -m unittest discover -s tests`.
