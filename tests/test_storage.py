@@ -141,6 +141,16 @@ class StorageTests(unittest.TestCase):
         self.store.save_preferences(preferences)
         self.assertIsNone(Store(self.root).load_preferences()["font"])
 
+    def test_marker_visibility_persists_and_older_preferences_default_to_hidden(self):
+        preferences = self.store.load_preferences()
+        self.assertTrue(preferences["hide_markers"])
+        preferences["hide_markers"] = False
+        self.store.save_preferences(preferences)
+        self.assertFalse(Store(self.root).load_preferences()["hide_markers"])
+        del preferences["hide_markers"]
+        self.store.save_preferences(preferences)
+        self.assertTrue(Store(self.root).load_preferences()["hide_markers"])
+
     def test_existing_preferences_without_font_use_system_default(self):
         preferences = self.store.load_preferences()
         del preferences["font"]

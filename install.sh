@@ -12,23 +12,31 @@ app_dir="$data_home/justnotes/application"
 bin_dir=${JUSTNOTES_BIN_DIR:-"$HOME/.local/bin"}
 desktop_dir="$data_home/applications"
 icon_dir="$data_home/icons/hicolor/scalable/apps"
+app_id=io.github.nightfury.justnotes
 mkdir -p -- "$app_dir/assets/fonts" "$bin_dir" "$desktop_dir" "$icon_dir"
 if [ "$source_dir" != "$app_dir" ]; then
-    for file in app.py storage.py formatting.py appearance.py justnotes; do
+    for file in app.py storage.py formatting.py appearance.py justnotes uninstall.sh; do
         install -m 644 -- "$source_dir/$file" "$app_dir/$file"
     done
-    for file in "$source_dir"/assets/*.svg; do
+    for file in "$source_dir"/assets/*.svg "$source_dir"/assets/*.png; do
+        [ -f "$file" ] || continue
         install -m 644 -- "$file" "$app_dir/assets/"
     done
     for file in "$source_dir"/assets/fonts/*.ttf "$source_dir/assets/fonts/LICENSE.txt"; do
         install -m 644 -- "$file" "$app_dir/assets/fonts/"
     done
 fi
-chmod +x -- "$app_dir/justnotes"
+chmod +x -- "$app_dir/justnotes" "$app_dir/uninstall.sh"
 ln -sfn -- "$app_dir/justnotes" "$bin_dir/justnotes"
-install -m 644 -- "$source_dir/assets/justnotes.svg" "$icon_dir/justnotes.svg"
+install -m 644 -- "$source_dir/assets/justnotes.svg" "$icon_dir/$app_id.svg"
+if [ -f "$source_dir/assets/justnotes.png" ]; then
+    mkdir -p -- "$data_home/icons/hicolor/256x256/apps"
+    install -m 644 -- "$source_dir/assets/justnotes.png" "$data_home/icons/hicolor/256x256/apps/$app_id.png"
+else
+    rm -f -- "$data_home/icons/hicolor/256x256/apps/$app_id.png"
+fi
 # Use desktop-entry escaping, including percent field-code escaping.
-/usr/bin/python3 - "$source_dir/justnotes.desktop" "$desktop_dir/justnotes.desktop" "$app_dir/justnotes" <<'PY'
+/usr/bin/python3 - "$source_dir/justnotes.desktop" "$desktop_dir/$app_id.desktop" "$app_dir/justnotes" <<'PY'
 import pathlib
 import sys
 
@@ -39,6 +47,11 @@ escaped = escaped.replace('\\', '\\\\')
 text = pathlib.Path(source).read_text().replace('Exec=justnotes', 'Exec="' + escaped + '"')
 pathlib.Path(destination).write_text(text)
 PY
+# Migrate the old menu entry so GNOME uses the desktop ID matching Gtk.Application.
+rm -f -- "$desktop_dir/justnotes.desktop" "$icon_dir/justnotes.svg"
+if command -v gtk-update-icon-cache >/dev/null 2>&1; then
+    gtk-update-icon-cache -f -t "$data_home/icons/hicolor" >/dev/null 2>&1 || true
+fi
 if command -v update-desktop-database >/dev/null 2>&1; then
     update-desktop-database "$desktop_dir" || true
 fi

@@ -22,7 +22,7 @@ class BufferEditor:
                      "text_changed", "restyle", "snapshot", "record_history", "begin_action",
                      "end_action", "undo", "load_editor", "activate_note", "new_note",
                      "apply_format", "close_requested", "open_note", "import_file", "key_pressed",
-                     "set_editor_font", "choose_font"):
+                     "set_editor_font", "choose_font", "toggle_markers"):
             locals()[name] = getattr(Editor, name)
 
     def __init__(self, store):
@@ -46,7 +46,7 @@ class BufferEditor:
         self.report = Mock()
         self.apply_theme = Mock()
         self.buffer = Gtk.TextBuffer()
-        for tag in ("bold", "italic", "marker", *(f"heading{i}" for i in range(1, 7))):
+        for tag in ("bold", "italic", "strikethrough", "marker", *(f"heading{i}" for i in range(1, 7))):
             self.buffer.create_tag(tag)
         self.buffer.connect("changed", self.text_changed)
         self.buffer.connect("begin-user-action", self.begin_action)
@@ -101,6 +101,63 @@ class EditingTests(unittest.TestCase):
         self.assertEqual(self.editor.text(), "hello")
         self.editor.undo(redo=True)
         self.assertEqual(self.editor.text(), "**hello**")
+
+    def test_bold_italic_and_strikethrough_toggle_and_preserve_undo(self):
+        self.type_text("hello")
+        for marker in ("**", "*", "~"):
+            with self.subTest(marker=marker):
+                self.editor.buffer.select_range(self.editor.buffer.get_start_iter(), self.editor.buffer.get_end_iter())
+                self.editor.apply_format(marker=marker)
+                self.assertEqual(self.editor.text(), marker + "hello" + marker)
+                self.editor.apply_format(marker=marker)
+                self.assertEqual(self.editor.text(), "hello")
+                self.assertEqual(self.store.load_note(self.editor.note["id"])["text"], "hello")
+                self.editor.undo()
+                self.assertEqual(self.editor.text(), marker + "hello" + marker)
+                self.editor.undo(redo=True)
+                self.assertEqual(self.editor.text(), "hello")
+
+    def test_heading_toggles_selected_lines_without_stacking(self):
+        self.type_text("one\ntwo")
+        self.editor.buffer.select_range(self.editor.buffer.get_start_iter(), self.editor.buffer.get_end_iter())
+        self.editor.apply_format(level=2)
+        self.assertEqual(self.editor.text(), "## one\n## two")
+        self.editor.apply_format(level=2)
+        self.assertEqual(self.editor.text(), "one\ntwo")
+        self.editor.apply_format(level=3)
+        self.assertEqual(self.editor.text(), "### one\n### two")
+        self.editor.apply_format(level=1)
+        self.assertEqual(self.editor.text(), "# one\n# two")
+
+    def test_hidden_markers_preserve_source_and_can_be_shown(self):
+        raw = "# Title\n**bold** *italic* ~gone~ ~~also gone~~ 🌙"
+        self.type_text(raw)
+        self.clear_idle()
+        self.editor.restyle()
+        start, end = self.editor.buffer.get_bounds()
+        self.assertEqual(self.editor.buffer.get_text(start, end, False), "Title\nbold italic gone also gone 🌙")
+        self.assertEqual(self.editor.text(), raw)
+        self.assertEqual(self.store.load_note(self.editor.note["id"])["text"], raw)
+        history_size = len(self.editor.history)
+        toggle = Mock()
+        toggle.get_active.return_value = False
+        self.editor.toggle_markers(toggle)
+        self.assertEqual(self.editor.buffer.get_text(*self.editor.buffer.get_bounds(), False), raw)
+        self.assertFalse(Store(self.store.root).load_preferences()["hide_markers"])
+        toggle.get_active.return_value = True
+        self.editor.toggle_markers(toggle)
+        self.assertEqual(len(self.editor.history), history_size)
+        self.assertTrue(Store(self.store.root).load_preferences()["hide_markers"])
+
+    def test_strikethrough_keyboard_shortcut_toggles(self):
+        self.type_text("gone")
+        self.editor.buffer.select_range(self.editor.buffer.get_start_iter(), self.editor.buffer.get_end_iter())
+        event = SimpleNamespace(keyval=Gdk.keyval_from_name("X"),
+                                state=Gdk.ModifierType.CONTROL_MASK | Gdk.ModifierType.SHIFT_MASK)
+        self.assertTrue(self.editor.key_pressed(None, event))
+        self.assertEqual(self.editor.text(), "~gone~")
+        self.assertTrue(self.editor.key_pressed(None, event))
+        self.assertEqual(self.editor.text(), "gone")
 
     def test_formatting_empty_selection_places_caret_inside_markers(self):
         self.editor.apply_format(marker="**")

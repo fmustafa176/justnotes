@@ -13,8 +13,10 @@ gi.require_version("Gtk", "3.0")
 gi.require_version("Gdk", "3.0")
 from gi.repository import Gdk, Gio, GLib, Gtk, Pango
 
-from formatting import heading_edit, inline_edit, spans
+from formatting import heading_edit, spans, toggle_inline
 from storage import StorageError, Store
+
+APP_ID = "io.github.nightfury.justnotes"
 
 
 def glyph(name):
@@ -63,7 +65,9 @@ class Editor(Gtk.ApplicationWindow):
         self.set_default_size(self.preferences["width"], self.preferences["height"])
         self.set_size_request(360, 280)
         self.get_style_context().add_class("justnotes-window")
-        icon = Path(__file__).parent / "assets/justnotes.svg"
+        icon = Path(__file__).parent / "assets/justnotes.png"
+        if not icon.exists():
+            icon = icon.with_suffix(".svg")
         self.set_icon_from_file(str(icon))
 
         layout = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
@@ -127,10 +131,12 @@ class Editor(Gtk.ApplicationWindow):
 
         self.buffer.create_tag("bold", weight=Pango.Weight.BOLD)
         self.buffer.create_tag("italic", style=Pango.Style.ITALIC)
+        self.buffer.create_tag("strikethrough", strikethrough=True)
         for level, size in enumerate((38, 28, 22, 21, 20, 19), 1):
             self.buffer.create_tag(f"heading{level}", weight=Pango.Weight.SEMIBOLD, scale=size / 19)
         self.marker_tag = self.buffer.create_tag("marker", weight=Pango.Weight.NORMAL,
-                                                 style=Pango.Style.NORMAL)
+                                                 style=Pango.Style.NORMAL,
+                                                 invisible=self.preferences.get("hide_markers", True))
         self.css = Gtk.CssProvider()
         Gtk.StyleContext.add_provider_for_screen(self.get_screen(), self.css, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
         self.apply_theme()
@@ -218,6 +224,8 @@ class Editor(Gtk.ApplicationWindow):
         self.style_source = 0
         start, end = self.buffer.get_bounds()
         self.buffer.remove_all_tags(start, end)
+        self.buffer.get_tag_table().lookup("marker").set_property(
+            "invisible", self.preferences.get("hide_markers", True))
         text = self.text()
         for tag, first, last in spans(text):
             if tag.startswith("heading"):
@@ -278,6 +286,11 @@ class Editor(Gtk.ApplicationWindow):
             GLib.source_remove(self.style_source)
             self.style_source = 0
         self.restyle()
+        if self.preferences.get("hide_markers", True):
+            for tag, first, last in spans(note["text"]):
+                if tag == "marker" and first == 0:
+                    self.buffer.place_cursor(self.buffer.get_iter_at_offset(last))
+                    break
 
     def activate_note(self, note):
         if not self.flush():
@@ -418,9 +431,11 @@ class Editor(Gtk.ApplicationWindow):
             first = last = self.buffer.get_iter_at_mark(self.buffer.get_insert()).get_offset()
         if level is not None:
             first, last, replacement = heading_edit(self.text(), first, last, level)
-            selected_start = selected_end = len(replacement)
+            selected_start = 0 if selection else len(replacement)
+            selected_end = len(replacement)
         else:
-            replacement, selected_start, selected_end = inline_edit(self.text(), first, last, marker)
+            first, last, replacement, selected_start, selected_end = toggle_inline(
+                self.text(), first, last, marker)
         self.buffer.begin_user_action()
         try:
             self.buffer.delete(self.buffer.get_iter_at_offset(first), self.buffer.get_iter_at_offset(last))
@@ -439,6 +454,10 @@ class Editor(Gtk.ApplicationWindow):
         box.pack_start(inline, False, False, 0)
         self.format_action(inline, "<b>B</b>  Bold", lambda *_: self.apply_format(marker="**"), "Bold (Ctrl+B)")
         self.format_action(inline, "<i>I</i>  Italic", lambda *_: self.apply_format(marker="*"), "Italic (Ctrl+I)")
+        strike = Gtk.Box()
+        box.pack_start(strike, False, False, 4)
+        self.format_action(strike, "<s>S</s>  Strikethrough", lambda *_: self.apply_format(marker="~"),
+                           "Strikethrough (Ctrl+Shift+X)")
         self.section_label(box, "HEADING")
         headings = Gtk.Box(spacing=4, homogeneous=True)
         box.pack_start(headings, False, False, 0)
@@ -462,8 +481,23 @@ class Editor(Gtk.ApplicationWindow):
         reset.set_sensitive(self.preferences.get("font") is not None)
         reset.connect("clicked", lambda *_: self.set_editor_font(None))
         fonts.pack_start(reset, False, False, 0)
+        hide_markers = Gtk.CheckButton(label="Hide Markdown markers")
+        hide_markers.set_active(self.preferences.get("hide_markers", True))
+        hide_markers.set_tooltip_text("Show formatting without *, **, ~, or # markers. Saved Markdown is preserved.")
+        hide_markers.set_margin_top(8)
+        hide_markers.connect("toggled", self.toggle_markers)
+        box.pack_start(hide_markers, False, False, 0)
         popover.show_all()
         popover.popup()
+
+    def toggle_markers(self, button):
+        self.preferences["hide_markers"] = button.get_active()
+        self.preferences_dirty = True
+        if self.style_source:
+            GLib.source_remove(self.style_source)
+            self.style_source = 0
+        self.restyle()
+        self.flush()
 
     def choose_font(self, *_):
         for popover in self.popovers:
@@ -533,11 +567,13 @@ class Editor(Gtk.ApplicationWindow):
             label.set_margin_start(4)
             box.pack_start(label, False, False, 0)
         self.section_label(box, "SYNTAX")
-        for marker, description in (("*text*", "Italic"), ("**text**", "Bold"), ("# … ######", "Heading 1–6")):
+        for marker, description in (("*text*", "Italic"), ("**text**", "Bold"),
+                                    ("~text~ / ~~text~~", "Strikethrough"), ("# … ######", "Heading 1–6")):
             self.info_row(box, marker, description, syntax=True)
         self.section_label(box, "SHORTCUTS")
         for action, shortcut in (("New note", "Ctrl+N"), ("Open file", "Ctrl+O"),
                                  ("Bold", "Ctrl+B"), ("Italic", "Ctrl+I"),
+                                 ("Strikethrough", "Ctrl+Shift+X"),
                                  ("Undo / Redo", "Ctrl+Z / Ctrl+Shift+Z")):
             self.info_row(box, action, shortcut)
         box.pack_start(Gtk.Separator(), False, False, 0)
@@ -578,6 +614,8 @@ class Editor(Gtk.ApplicationWindow):
             self.import_file()
         elif key in ("b", "i") and self.view.has_focus():
             self.apply_format(marker="**" if key == "b" else "*")
+        elif key == "x" and shift and self.view.has_focus():
+            self.apply_format(marker="~")
         elif key in ("z", "y") and self.view.has_focus():
             self.undo(redo=shift or key == "y")
         else:
@@ -621,7 +659,7 @@ class Editor(Gtk.ApplicationWindow):
 
 class Justnotes(Gtk.Application):
     def __init__(self):
-        super().__init__(application_id="io.github.nightfury.justnotes", flags=Gio.ApplicationFlags.FLAGS_NONE)
+        super().__init__(application_id=APP_ID, flags=Gio.ApplicationFlags.FLAGS_NONE)
         self.store = None
 
     def do_activate(self):
@@ -654,6 +692,7 @@ def main():
     if not Gtk.init_check()[0]:
         print("justnotes needs a graphical desktop (GTK 3 could not open a display).", file=sys.stderr)
         return 1
+    Gtk.Window.set_default_icon_name(APP_ID)
     return Justnotes().run(sys.argv)
 
 

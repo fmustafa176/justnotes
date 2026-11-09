@@ -1,4 +1,31 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
-  <rect x="22" y="12" width="84" height="104" rx="12" fill="#faf9f6" stroke="#424b56" stroke-width="6"/>
-  <path d="M40 44h48M40 62h48M40 80h34" fill="none" stroke="#424b56" stroke-width="6" stroke-linecap="round"/>
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <title>justnotes window with Mac-style dots, JN, and a purple cursor</title>
+  <defs>
+    <path id="outline" d="M128 8C236 8 248 20 248 128S236 248 128 248 8 236 8 128 20 8 128 8Z"/>
+    <clipPath id="window"><use href="#outline"/></clipPath>
+  </defs>
+  <g clip-path="url(#window)">
+    <rect x="8" y="8" width="240" height="240" fill="#131418"/>
+    <path d="M8 8h240v28H8z" fill="#343434"/>
+    <path d="M8 36h240" stroke="#08090b"/>
+    <circle cx="50" cy="25" r="4" fill="#ff5f57"/>
+    <circle cx="64" cy="25" r="4" fill="#febc2e"/>
+    <circle cx="78" cy="25" r="4" fill="#28c840"/>
+    <text x="153" y="28" text-anchor="middle" fill="#e9eaee" font-family="sans-serif" font-size="9">justnotes</text>
+    <text x="26" y="65" fill="#9b9fad" font-family="sans-serif" font-size="10" font-weight="600">Untitled</text>
+    <g fill="none" stroke="#9b9fad" stroke-width="1.1" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M174 54h6l3 3v10h-9zM177 60h4M177 63h4"/>
+      <circle cx="202" cy="61" r="3"/>
+      <path d="M202 54v2M202 66v2M195 61h2M207 61h2M197 56l1.5 1.5M205.5 64.5L207 66M207 56l-1.5 1.5M198.5 64.5L197 66"/>
+    </g>
+    <text x="222" y="65" text-anchor="middle" fill="#9b9fad" font-family="sans-serif" font-size="10" font-weight="600">Aa</text>
+    <g transform="translate(16 56) scale(.85 .75)" fill="#e9eaee">
+      <path d="M76 64h14v92c0 25-13 38-34 38-20 0-32-12-32-32h14c0 12 6 19 18 19 13 0 20-8 20-25z"/>
+      <path d="M107 192V64h15l52 101V64h14v128h-15l-52-101v101z"/>
+      <path d="M204 42h7v164h-7z" fill="#a29bff"/>
+    </g>
+    <circle cx="217" cy="220" r="9" fill="none" stroke="#303139"/>
+    <text x="217" y="224" text-anchor="middle" fill="#9b9fad" font-family="serif" font-size="12" font-style="italic">i</text>
+  </g>
+  <use href="#outline" fill="none" stroke="#090a0d"/>
 </svg>

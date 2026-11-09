@@ -50,6 +50,7 @@ class Store:
     def _preferences(value):
         return (isinstance(value, dict) and value.get("version") == 1
                 and value.get("theme") in ("light", "dark")
+                and isinstance(value.get("hide_markers", True), bool)
                 and (value.get("font") is None or
                      isinstance(value["font"], str) and 0 < len(value["font"]) <= 512
                      and not any(ord(char) < 32 for char in value["font"]))
@@ -170,9 +171,11 @@ class Store:
     def load_preferences(self):
         path = self.root / "preferences.json"
         if not path.exists() and not path.with_suffix(".json.bak").exists():
-            return dict(version=1, theme="light", width=960, height=600, last_note=None, font=None)
+            return dict(version=1, theme="light", width=960, height=600, last_note=None, font=None,
+                        hide_markers=True)
         preferences = self._load(path, self._preferences)
         preferences.setdefault("font", None)
+        preferences.setdefault("hide_markers", True)
         return preferences
 
     def save_preferences(self, preferences):
