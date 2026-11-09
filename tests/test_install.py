@@ -34,6 +34,26 @@ class InstallationTests(unittest.TestCase):
             self.assertEqual((data / f"icons/hicolor/scalable/apps/{app_id}.svg").read_bytes(),
                              (source / "assets/justnotes.svg").read_bytes())
             self.assertTrue(os.access(binary / "justnotes", os.X_OK))
+            self.assertTrue((data / "justnotes/application/system_theme.py").is_file())
+            installed = data / "justnotes/application"
+            for filename in ("app.py", "appearance.py", "system_theme.py", "storage.py", "formatting.py"):
+                self.assertEqual((installed / filename).read_bytes(), (source / filename).read_bytes())
+            # Exercise the installed controller, not modules imported from the
+            # source tree: this catches testing a different copy than we ship.
+            smoke = '''import app
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
+assert not hasattr(app.Editor, "toggle_theme")
+assert not hasattr(app.Editor, "show_themes")
+assert hasattr(app.Editor, "toggle_editor_theme")
+view = SimpleNamespace(preferences={"font": None, "editor_theme": "light"},
+                       css=app.Gtk.CssProvider(), marker_tag=app.Gtk.TextTag(), theme_button=Mock())
+with patch("app.Gtk.Settings.get_default") as settings:
+    app.Editor.apply_appearance(view)
+settings.assert_not_called()
+'''
+            subprocess.run(["/usr/bin/python3", "-c", smoke], cwd=installed,
+                           env=environment, check=True, capture_output=True)
             store = Store(data / "justnotes")
             note = store.create_note(text="**Keep my notes**")
             preferences = store.load_preferences()

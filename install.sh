@@ -15,7 +15,7 @@ icon_dir="$data_home/icons/hicolor/scalable/apps"
 app_id=io.github.nightfury.justnotes
 mkdir -p -- "$app_dir/assets/fonts" "$bin_dir" "$desktop_dir" "$icon_dir"
 if [ "$source_dir" != "$app_dir" ]; then
-    for file in app.py storage.py formatting.py appearance.py justnotes uninstall.sh; do
+    for file in app.py storage.py formatting.py appearance.py system_theme.py justnotes uninstall.sh; do
         install -m 644 -- "$source_dir/$file" "$app_dir/$file"
     done
     for file in "$source_dir"/assets/*.svg "$source_dir"/assets/*.png; do
@@ -55,4 +55,4 @@ fi
 if command -v update-desktop-database >/dev/null 2>&1; then
     update-desktop-database "$desktop_dir" || true
 fi
-printf 'Installed justnotes to %s\nLaunch from your application menu or %s/justnotes\n' "$app_dir" "$bin_dir"
+printf 'Installed from %s\nInstalled justnotes to %s\nLaunch from your application menu or %s/justnotes\nClose and reopen justnotes to load an update.\n' "$source_dir" "$app_dir" "$bin_dir"

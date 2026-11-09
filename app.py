@@ -3,7 +3,7 @@
 import sys
 from pathlib import Path
 
-from appearance import THEMES, modified_label, register_fonts, stylesheet
+from appearance import EDITOR_COLORS, modified_label, register_fonts, stylesheet
 
 register_fonts()
 
@@ -15,14 +15,14 @@ from gi.repository import Gdk, Gio, GLib, Gtk, Pango
 
 from formatting import heading_edit, spans, toggle_inline
 from storage import StorageError, Store
+from system_theme import SystemTheme, TitlebarBackground, follow_system
 
 APP_ID = "io.github.nightfury.justnotes"
 
 
 def glyph(name):
     """Use the desktop's symbolic icons and its light/dark recoloring."""
-    icon = {"notes": "text-x-generic-symbolic", "moon": "weather-clear-night-symbolic",
-            "sun": "weather-clear-symbolic"}[name]
+    icon = {"notes": "text-x-generic-symbolic", "moon": "weather-clear-night-symbolic"}[name]
     image = Gtk.Image.new_from_icon_name(icon, Gtk.IconSize.BUTTON)
     image.set_pixel_size(20)
     return image
@@ -62,15 +62,27 @@ class Editor(Gtk.ApplicationWindow):
         self.style_source = 0
         self.geometry_source = 0
         self.popovers = []
+        self.system_theme = None
         self.set_default_size(self.preferences["width"], self.preferences["height"])
         self.set_size_request(360, 280)
         self.get_style_context().add_class("justnotes-window")
+        visual = self.get_screen().get_rgba_visual()
+        if visual is not None:
+            self.set_visual(visual)
+        titlebar = Gtk.HeaderBar(title="justnotes", show_close_button=True)
+        titlebar.set_has_subtitle(False)
+        # Leave decoration-layout unset so GTK uses the desktop's button layout.
+        self.set_titlebar(titlebar)
+        self.titlebar_background = None
+        if visual is not None and self.is_composited():
+            self.titlebar_background = TitlebarBackground(titlebar)
         icon = Path(__file__).parent / "assets/justnotes.png"
         if not icon.exists():
             icon = icon.with_suffix(".svg")
         self.set_icon_from_file(str(icon))
 
         layout = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        layout.get_style_context().add_class("editor-surface")
         self.add(layout)
         controls = Gtk.Box(spacing=4)
         controls.set_margin_top(20)
@@ -87,7 +99,7 @@ class Editor(Gtk.ApplicationWindow):
         controls.pack_start(self.title_entry, True, True, 0)
         self.notes_button = self.button("notes", "Notes / Open (Ctrl+O)", self.show_notes)
         controls.pack_start(self.notes_button, False, False, 0)
-        self.theme_button = self.button("moon", "Switch light / dark theme", self.toggle_theme)
+        self.theme_button = self.button("moon", "Toggle editor light/dark mode", self.toggle_editor_theme)
         controls.pack_start(self.theme_button, False, False, 0)
         self.format_button = self.button("Aa", "Formatting", self.show_formatting)
         controls.pack_start(self.format_button, False, False, 0)
@@ -139,7 +151,9 @@ class Editor(Gtk.ApplicationWindow):
                                                  invisible=self.preferences.get("hide_markers", True))
         self.css = Gtk.CssProvider()
         Gtk.StyleContext.add_provider_for_screen(self.get_screen(), self.css, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
-        self.apply_theme()
+        self.apply_appearance()
+        follow_system(Gtk.Settings.get_default())
+        self.system_theme = SystemTheme(self.system_theme_changed)
         self.title_entry.connect("changed", self.title_changed)
         self.buffer.connect("changed", self.text_changed)
         self.buffer.connect("begin-user-action", self.begin_action)
@@ -519,7 +533,7 @@ class Editor(Gtk.ApplicationWindow):
     def set_editor_font(self, font):
         self.preferences["font"] = font
         self.preferences_dirty = True
-        self.apply_theme()
+        self.apply_appearance()
         self.flush()
         for popover in self.popovers:
             popover.popdown()
@@ -586,21 +600,23 @@ class Editor(Gtk.ApplicationWindow):
         popover.show_all()
         popover.popup()
 
-    def apply_theme(self):
-        dark = self.preferences["theme"] == "dark"
-        Gtk.Settings.get_default().set_property("gtk-application-prefer-dark-theme", dark)
-        self.marker_tag.set_property("foreground", THEMES[self.preferences["theme"]]["accent"])
-        self.css.load_from_data((stylesheet(self.preferences["theme"]) +
-                                 editor_font_css(self.preferences.get("font"))).encode())
-        self.theme_button.get_child().destroy()
-        self.theme_button.add(glyph("sun" if dark else "moon"))
-        self.theme_button.show_all()
+    def apply_appearance(self):
+        mode = self.preferences.get("editor_theme", "light")
+        self.css.load_from_data((stylesheet(mode) + editor_font_css(self.preferences.get("font"))).encode())
+        self.marker_tag.set_property("foreground", EDITOR_COLORS[mode]["accent"])
+        self.theme_button.get_child().set_from_icon_name(
+            "weather-clear-symbolic" if mode == "dark" else "weather-clear-night-symbolic", Gtk.IconSize.BUTTON)
+        self.theme_button.get_child().set_pixel_size(20)
+        self.theme_button.set_tooltip_text(f"Editor: {mode} — switch to {'light' if mode == 'dark' else 'dark'}")
 
-    def toggle_theme(self, *_):
-        self.preferences["theme"] = "light" if self.preferences["theme"] == "dark" else "dark"
+    def toggle_editor_theme(self, *_):
+        self.preferences["editor_theme"] = "dark" if self.preferences.get("editor_theme", "light") == "light" else "light"
         self.preferences_dirty = True
-        self.apply_theme()
+        self.apply_appearance()
         self.flush()
+
+    def system_theme_changed(self):
+        follow_system(Gtk.Settings.get_default(), self.system_theme.dark)
 
     def key_pressed(self, _widget, event):
         modifiers = event.state & Gtk.accelerator_get_default_mod_mask()
@@ -651,6 +667,10 @@ class Editor(Gtk.ApplicationWindow):
         return not self.flush()
 
     def destroyed(self, *_):
+        if self.titlebar_background:
+            self.titlebar_background.close()
+        if self.system_theme:
+            self.system_theme.close()
         for source in (self.geometry_source, self.style_source):
             if source:
                 GLib.source_remove(source)

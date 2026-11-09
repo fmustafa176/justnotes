@@ -123,8 +123,8 @@ class StorageTests(unittest.TestCase):
 
     def test_preferences_restart_and_recovery(self):
         preferences = self.store.load_preferences()
-        self.assertEqual(preferences["theme"], "light")
-        preferences.update(theme="dark", width=1120, height=780,
+        self.assertNotIn("theme", preferences)
+        preferences.update(width=1120, height=780,
                            last_note=self.store.create_note()["id"])
         self.store.save_preferences(preferences)
         self.assertEqual(Store(self.root).load_preferences(), preferences)
@@ -157,7 +157,18 @@ class StorageTests(unittest.TestCase):
         self.store.save_preferences(preferences)
         loaded = Store(self.root).load_preferences()
         self.assertIsNone(loaded["font"])
-        self.assertEqual(loaded["theme"], preferences["theme"])
+        self.assertEqual(loaded["width"], preferences["width"])
+
+    def test_legacy_theme_override_is_removed_without_losing_other_preferences(self):
+        preferences = self.store.load_preferences()
+        del preferences["editor_theme"]
+        preferences.update(theme="dark", font="Sans 14", hide_markers=False)
+        self.store.save_preferences(preferences)
+        loaded = Store(self.root).load_preferences()
+        self.assertNotIn("theme", loaded)
+        self.assertEqual(loaded["editor_theme"], "dark")
+        self.assertEqual(loaded["font"], "Sans 14")
+        self.assertFalse(loaded["hide_markers"])
 
     def test_xdg_data_home(self):
         with patch.dict(os.environ, {"XDG_DATA_HOME": str(self.root)}):

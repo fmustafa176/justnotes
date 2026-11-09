@@ -22,7 +22,7 @@ class BufferEditor:
                      "text_changed", "restyle", "snapshot", "record_history", "begin_action",
                      "end_action", "undo", "load_editor", "activate_note", "new_note",
                      "apply_format", "close_requested", "open_note", "import_file", "key_pressed",
-                     "set_editor_font", "choose_font", "toggle_markers"):
+                     "set_editor_font", "choose_font", "toggle_markers", "toggle_editor_theme"):
             locals()[name] = getattr(Editor, name)
 
     def __init__(self, store):
@@ -44,7 +44,7 @@ class BufferEditor:
         self.view = Mock()
         self.error_bar = Mock()
         self.report = Mock()
-        self.apply_theme = Mock()
+        self.apply_appearance = Mock()
         self.buffer = Gtk.TextBuffer()
         for tag in ("bold", "italic", "strikethrough", "marker", *(f"heading{i}" for i in range(1, 7))):
             self.buffer.create_tag(tag)
@@ -220,6 +220,14 @@ class EditingTests(unittest.TestCase):
         self.assertTrue(self.editor.flush())
         self.assertEqual(self.store.load_preferences()["font"], "Sans 14")
 
+    def test_editor_light_dark_toggle_persists_without_changing_notes(self):
+        self.type_text("my note")
+        self.editor.toggle_editor_theme()
+        self.assertEqual(Store(self.store.root).load_preferences()["editor_theme"], "dark")
+        self.editor.toggle_editor_theme()
+        self.assertEqual(Store(self.store.root).load_preferences()["editor_theme"], "light")
+        self.assertEqual(self.editor.text(), "my note")
+
     def test_font_chooser_applies_selection(self):
         dialog = Mock()
         dialog.run.return_value = Gtk.ResponseType.OK
@@ -308,8 +316,26 @@ class WindowTests(unittest.TestCase):
                 window.show_notes()
                 window.show_formatting()
                 window.show_info()
-                window.toggle_theme()
-                self.assertEqual(store.load_preferences()["theme"], "dark")
+                self.assertIsInstance(window.get_titlebar(), Gtk.HeaderBar)
+                self.assertFalse(window.get_titlebar().get_property("decoration-layout-set"))
+                self.assertTrue(hasattr(window, "theme_button"))
+                self.assertNotIn("theme", store.load_preferences())
+                settings = Gtk.Settings.get_default()
+                dark_preference = settings.get_property("gtk-application-prefer-dark-theme")
+                if window.titlebar_background:
+                    window.titlebar_background.refresh()
+                titlebar_color = window.get_titlebar().get_style_context().get_background_color(Gtk.StateFlags.NORMAL)
+                if window.titlebar_background:
+                    self.assertLessEqual(titlebar_color.alpha, 0.841)
+                self.assertEqual(window.get_titlebar().get_opacity(), 1)
+                self.assertEqual(window.get_opacity(), 1)
+                self.assertEqual(window.view.get_style_context().get_background_color(Gtk.StateFlags.NORMAL).alpha, 1)
+                window.theme_button.clicked()
+                self.assertEqual(store.load_preferences()["editor_theme"], "dark")
+                self.assertEqual(settings.get_property("gtk-application-prefer-dark-theme"), dark_preference)
+                self.assertEqual(window.get_titlebar().get_style_context().get_background_color(Gtk.StateFlags.NORMAL), titlebar_color)
+                for state in (Gtk.StateFlags.NORMAL, Gtk.StateFlags.FOCUSED, Gtk.StateFlags.BACKDROP):
+                    self.assertEqual(window.title_entry.get_style_context().get_background_color(state).alpha, 0)
                 note_id = window.note["id"]
                 window.new_note()
                 window.open_note(note_id)

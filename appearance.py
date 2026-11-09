@@ -1,18 +1,8 @@
-"""Prototype colors and bundled, offline typography for GTK 3."""
+"""Native GTK layout and bundled, offline typography."""
 
 import ctypes
 from datetime import datetime
 from pathlib import Path
-
-
-THEMES = {
-    "light": dict(background="#FAFAF9", foreground="#1F2024", muted="#6A6D78",
-                  accent="#5B4FE0", line="rgba(20,20,40,0.10)", hover="rgba(20,20,40,0.06)",
-                  popover="#FFFFFF", selection="rgba(91,79,224,0.16)", shadow="rgba(20,20,40,0.16)"),
-    "dark": dict(background="#131418", foreground="#E9EAEE", muted="#9B9FAD",
-                 accent="#A29BFF", line="rgba(255,255,255,0.10)", hover="rgba(255,255,255,0.07)",
-                 popover="#1B1C22", selection="rgba(162,155,255,0.22)", shadow="rgba(0,0,0,0.55)"),
-}
 
 
 def register_fonts():
@@ -46,80 +36,57 @@ def modified_label(timestamp, now=None):
     return f"{date.day} {date:%b}" if date.year == now.year else f"{date.day} {date:%b %Y}"
 
 
-def stylesheet(theme):
-    return """
-    .justnotes-window, .justnotes-surface {
-        color: %(foreground)s;
+EDITOR_COLORS = {
+    "light": dict(background="#FAFAF9", foreground="#1F2024", muted="#6A6D78",
+                  accent="#5B4FE0", selection="rgba(91,79,224,0.16)"),
+    "dark": dict(background="#131418", foreground="#E9EAEE", muted="#9B9FAD",
+                 accent="#A29BFF", selection="rgba(162,155,255,0.22)"),
+}
+
+
+def titlebar_stylesheet(color):
+    """Change only the native header background's alpha, never widget opacity."""
+    red, green, blue = (round(channel * 255) for channel in (color.red, color.green, color.blue))
+    alpha = min(color.alpha, 0.84)
+    return ("headerbar.justnotes-translucent-titlebar { background-image: none; "
+            f"background-color: rgba({red}, {green}, {blue}, {alpha:.4f}); }}")
+
+
+def stylesheet(editor_theme="light"):
+    """Editor colors are scoped to content; window decorations stay native."""
+    colors = EDITOR_COLORS[editor_theme]
+    editor = """
+    window.justnotes-window { background-color: transparent; background-image: none; }
+    .editor-surface { background-color: %(background)s; color: %(foreground)s; }
+    .editor-surface textview, .editor-surface textview text {
+        background-color: %(background)s; color: %(foreground)s; caret-color: %(accent)s;
     }
-    .justnotes-window { background-color: %(background)s; }
-    .justnotes-window textview, .justnotes-window textview text {
-        background-color: %(background)s; color: %(foreground)s;
-        caret-color: %(accent)s;
+    .editor-surface entry.note-title,
+    .editor-surface entry.note-title:focus,
+    .editor-surface entry.note-title:backdrop {
+        background-color: transparent; background-image: none;
+        color: %(foreground)s; caret-color: %(accent)s;
+        border: none; box-shadow: none;
     }
-    .justnotes-window entry.note-title {
-        background: transparent; color: %(foreground)s;
-        caret-color: %(accent)s; font-size: 15px; font-weight: 600;
-        border: none; box-shadow: none; padding: 6px 0; min-height: 28px;
-    }
-    .justnotes-window button, .justnotes-surface button {
-        background-image: none; box-shadow: none; text-shadow: none;
-        border: none; color: %(foreground)s; outline-offset: -2px;
-    }
-    .justnotes-window button:focus, .justnotes-surface button:focus {
-        outline: 1px solid %(accent)s;
-    }
-    .justnotes-window button.chrome-button {
-        background: transparent; color: %(muted)s;
-        min-width: 40px; min-height: 40px; padding: 0;
-        border-radius: 10px; font-size: 15px; font-weight: 600;
-    }
-    .justnotes-window button.chrome-button:hover,
-    .justnotes-window button.chrome-button.popover-open {
-        background: %(hover)s; color: %(foreground)s;
-    }
-    .justnotes-window button.chrome-button image {
-        -gtk-icon-style: symbolic; -gtk-icon-shadow: none;
-    }
-    .justnotes-window button.info-button {
-        min-width: 30px; min-height: 30px; border: 1px solid %(line)s;
-        border-radius: 50%%;
-        font-family: "Newsreader 16pt 16pt", Newsreader, Georgia, serif;
-        font-size: 16px; font-style: italic; font-weight: 600;
-    }
-    .justnotes-window textview text selection,
-    .justnotes-window entry selection {
+    .editor-surface button.chrome-button { color: %(muted)s; }
+    .editor-surface button.chrome-button:hover { color: %(foreground)s; }
+    .editor-surface textview text selection, .editor-surface entry.note-title selection {
         background-color: %(selection)s; color: %(foreground)s;
     }
-    popover.justnotes-surface {
-        background: %(popover)s; border: 1px solid %(line)s;
-        border-radius: 14px; box-shadow: 0 18px 48px %(shadow)s; padding: 0;
+    """ % colors
+    return editor + """
+    .justnotes-window entry.note-title { font-weight: 600; }
+    .justnotes-window button.chrome-button {
+        min-width: 36px; min-height: 36px; padding: 0;
     }
-    .justnotes-surface button.menu-row {
-        background: transparent; border-radius: 9px;
-        min-height: 40px; padding: 0 12px; font-size: 14px; font-weight: 500;
-    }
-    .justnotes-surface button.menu-row:hover,
-    .justnotes-surface button.menu-row.current-note {
-        background: %(selection)s;
-    }
-    .justnotes-surface button.menu-row.current-note { color: %(accent)s; }
-    .justnotes-surface button.format-action {
-        background: %(hover)s; min-height: 36px; min-width: 0;
-        border-radius: 8px; padding: 0 7px; font-size: 13px; font-weight: 500;
-    }
-    .justnotes-surface button.format-action:hover { background: %(selection)s; }
-    .justnotes-surface .section-label {
-        font-size: 11px; font-weight: 500; color: %(muted)s;
-        margin: 12px 4px 6px;
-    }
-    .justnotes-surface .muted { color: %(muted)s; font-size: 12px; font-weight: 400; }
-    .justnotes-surface .keycap {
-        font-family: monospace; font-size: 11px; font-weight: 500;
-        color: %(muted)s; padding: 2px 6px;
-        border-radius: 5px; border: 1px solid %(line)s;
-    }
-    .justnotes-surface separator { background: %(line)s; min-height: 1px; margin: 6px 4px; }
-    .justnotes-surface .info-row { font-size: 13px; padding: 6px 4px; }
-    .justnotes-surface .about-title { font-size: 15px; font-weight: 600; }
+    .justnotes-window button.info-button { min-width: 30px; min-height: 30px; }
+    .justnotes-surface button.menu-row { min-height: 36px; padding: 0 12px; }
+    .justnotes-surface button.menu-row.current-note { font-weight: bold; }
+    .justnotes-surface button.format-action { min-height: 32px; padding: 0 7px; }
+    .justnotes-surface .section-label { margin: 12px 4px 6px; font-weight: bold; }
+    .justnotes-surface .keycap { font-family: monospace; padding: 2px 6px; }
+    .justnotes-surface separator { margin: 6px 4px; }
+    .justnotes-surface .info-row { padding: 6px 4px; }
+    .justnotes-surface .about-title { font-weight: bold; }
     .justnotes-surface .info-footer { padding: 4px; }
-    """ % THEMES[theme]
+    """

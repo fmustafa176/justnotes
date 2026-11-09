@@ -26,21 +26,35 @@ class DateTests(unittest.TestCase):
 
 @unittest.skipIf(app is None, "System GTK / Pango is unavailable")
 class NativeAppearanceTests(unittest.TestCase):
-    def test_both_stylesheets_are_accepted_by_gtk(self):
-        for theme in ("light", "dark"):
-            with self.subTest(theme=theme):
-                provider = app.Gtk.CssProvider()
-                provider.load_from_data(stylesheet(theme).encode())
-                self.assertTrue(provider.to_string())
+    def test_native_stylesheet_is_accepted_by_gtk(self):
+        provider = app.Gtk.CssProvider()
+        provider.load_from_data(stylesheet().encode())
+        self.assertTrue(provider.to_string())
 
-    def test_selected_fonts_generate_valid_css_for_both_themes(self):
-        for theme in ("light", "dark"):
-            for font in (None, "DejaVu Sans Mono 14", "Inter Bold 16", "Newsreader 16pt 16pt Italic 19",
-                         "Sans 18px"):
-                with self.subTest(theme=theme, font=font):
+    def test_selected_fonts_generate_valid_css(self):
+        for mode in ("light", "dark"):
+            for font in (None, "DejaVu Sans Mono 14", "Inter Bold 16", "Newsreader 16pt 16pt Italic 19", "Sans 18px"):
+                with self.subTest(mode=mode, font=font):
                     provider = app.Gtk.CssProvider()
-                    provider.load_from_data((stylesheet(theme) + app.editor_font_css(font)).encode())
+                    provider.load_from_data((stylesheet(mode) + app.editor_font_css(font)).encode())
         self.assertEqual(app.editor_font_css(None), "")
+
+    def test_editor_palette_changes_do_not_touch_system_preferences(self):
+        from types import SimpleNamespace
+        from unittest.mock import Mock, patch
+        view = SimpleNamespace(preferences={"editor_theme": "light", "font": None},
+                               css=app.Gtk.CssProvider(), marker_tag=app.Gtk.TextTag(), theme_button=Mock())
+        with patch("app.Gtk.Settings.get_default") as settings:
+            app.Editor.apply_appearance(view)
+            light_css = view.css.to_string()
+            view.preferences["editor_theme"] = "dark"
+            app.Editor.apply_appearance(view)
+            self.assertNotEqual(light_css, view.css.to_string())
+            settings.assert_not_called()
+        for mode in ("light", "dark"):
+            self.assertNotIn("headerbar", stylesheet(mode))
+            self.assertNotIn("titlebutton", stylesheet(mode))
+            self.assertNotIn("opacity:", stylesheet(mode))
 
     def test_bundled_fonts_are_used_by_the_native_renderer(self):
         context = PangoCairo.FontMap.get_default().create_context()
