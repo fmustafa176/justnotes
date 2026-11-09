@@ -1,0 +1,11 @@
+#!/bin/sh
+# Resolve a symlink installed in ~/.local/bin as well as direct folder launches.
+set -eu
+launcher=$(readlink -f -- "$0")
+app_dir=$(dirname -- "$launcher")
+if ! /usr/bin/python3 -c 'import gi; gi.require_version("Gtk", "3.0"); from gi.repository import Gtk' 2>/dev/null; then
+    echo 'justnotes requires system Python 3, PyGObject, and GTK 3.' >&2
+    echo 'Debian/Ubuntu: sudo apt install python3-gi gir1.2-gtk-3.0' >&2
+    exit 1
+fi
+exec /usr/bin/python3 "$app_dir/app.py" "$@"
