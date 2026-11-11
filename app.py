@@ -1,6 +1,8 @@
 """The justnotes GTK 3 interface."""
 
 import sys
+import os
+import subprocess
 from pathlib import Path
 
 from appearance import EDITOR_COLORS, modified_label, register_fonts, stylesheet, tab_width, window_geometry
@@ -13,8 +15,9 @@ gi.require_version("Gtk", "3.0")
 gi.require_version("Gdk", "3.0")
 from gi.repository import Gdk, Gio, GLib, Gtk, Pango
 
-from formatting import heading_edit, spans, toggle_inline
+from formatting import heading_edit, spans, toggle_inline, list_edit, list_enter, toggle_task
 from storage import StorageError, Store
+from updates import UpdateClient, UpdateWorker
 from system_theme import SystemTheme, TitlebarBackground, follow_system
 
 APP_ID = "io.github.nightfury.justnotes"
@@ -82,6 +85,7 @@ class Editor(Gtk.ApplicationWindow):
         self.tab_pages = {}
         self.tab_labels = {}
         self.tab_widgets = {}
+        self.tab_closes = {}
         self.reveal_tab = False
         self.syncing_tabs = False
         self.preferences["last_note"] = self.note["id"]
@@ -102,6 +106,10 @@ class Editor(Gtk.ApplicationWindow):
         self.style_dirty = None
         self.popovers = []
         self.system_theme = None
+        self.update_worker = None
+        self.update_client = None
+        self.update_source = 0
+        self.update_repeat_source = 0
         display = self.get_display()
         monitors = [display.get_monitor(i) for i in range(display.get_n_monitors())]
         primary = display.get_primary_monitor()
@@ -126,20 +134,22 @@ class Editor(Gtk.ApplicationWindow):
         # Leave decoration-layout unset so GTK uses the desktop's button layout.
         self.set_titlebar(titlebar)
         self.titlebar_background = None
-        if visual is not None and self.is_composited():
-            self.titlebar_background = TitlebarBackground(titlebar)
         icon = Path(__file__).parent / "assets/justnotes.png"
         if not icon.exists():
             icon = icon.with_suffix(".svg")
         self.set_icon_from_file(str(icon))
 
         layout = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
-        layout.get_style_context().add_class("editor-surface")
+        layout.get_style_context().add_class("window-shell")
+        self.shell = layout
         self.add(layout)
+        self.titlebar_background = TitlebarBackground(
+            titlebar, shell=layout, translucent=visual is not None and self.is_composited())
         controls = Gtk.Box(spacing=4)
-        controls.set_margin_top(20)
-        controls.set_margin_start(28)
-        controls.set_margin_end(28)
+        controls.set_margin_top(4)
+        controls.set_margin_bottom(6)
+        controls.set_margin_start(20)
+        controls.set_margin_end(20)
         layout.pack_start(controls, False, False, 0)
         self.title_entry = Gtk.Entry()
         self.title_entry.set_has_frame(False)
@@ -148,9 +158,12 @@ class Editor(Gtk.ApplicationWindow):
         self.title_entry.set_tooltip_text("Title")
         self.title_entry.get_accessible().set_name("Title")
         self.title_entry.set_width_chars(1)
+        self.title_entry.set_alignment(.5)
         self.title_entry.set_hexpand(True)
         self.tab_strip = Gtk.Box(homogeneous=True)
+        self.tab_strip.get_style_context().add_class("tab-track")
         self.tab_scroll = Gtk.ScrolledWindow()
+        self.tab_scroll.get_style_context().add_class("tab-scroller")
         self.tab_scroll.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.NEVER)
         self.tab_scroll.set_overlay_scrolling(True)
         self.tab_scroll.set_min_content_width(1)
@@ -159,11 +172,8 @@ class Editor(Gtk.ApplicationWindow):
         self.tab_scroll.connect("size-allocate", self.size_tabs)
         self.tab_strip.connect("size-allocate", self.reveal_active_tab)
         self.notes_button = self.button("notes", "Notes", self.show_notes)
-        controls.pack_start(self.notes_button, False, False, 0)
         self.theme_button = self.button("moon", "Editor theme", self.toggle_editor_theme)
-        controls.pack_start(self.theme_button, False, False, 0)
         self.format_button = self.button("Aa", "Formatting", self.show_formatting)
-        controls.pack_start(self.format_button, False, False, 0)
 
         self.error_bar = Gtk.InfoBar()
         self.error_bar.set_message_type(Gtk.MessageType.ERROR)
@@ -181,36 +191,55 @@ class Editor(Gtk.ApplicationWindow):
         self.notebook.set_show_tabs(False)
         self.notebook.set_show_border(False)
         self.notebook.get_style_context().add_class("editor-tabs")
+        self.notebook.set_margin_start(10)
+        self.notebook.set_margin_end(10)
+        self.notebook.set_margin_bottom(6)
         layout.pack_start(self.notebook, True, True, 0)
         overlay = Gtk.Overlay()
         self.overlay = overlay
+        overlay.get_style_context().add_class("editor-surface")
         scroller = Gtk.ScrolledWindow()
         self.scroller = scroller
         scroller.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        # Keep rectangular text/scroll widgets inside the rounded opaque card.
+        for edge in ("top", "bottom", "start", "end"):
+            getattr(scroller, "set_margin_" + edge)(12)
         overlay.add(scroller)
         self.buffer = Gtk.TextBuffer()
         self.view = Gtk.TextView(buffer=self.buffer)
         self.view.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
-        self.view.set_left_margin(28)
-        self.view.set_right_margin(28)
-        self.view.set_top_margin(40)
-        self.view.set_bottom_margin(74)
+        self.view.set_left_margin(16)
+        self.view.set_right_margin(16)
+        self.view.set_top_margin(8)
+        self.view.set_bottom_margin(16)
         self.view.set_pixels_above_lines(5)
         self.view.set_pixels_below_lines(5)
         self.view.set_pixels_inside_wrap(10)
         self.view.get_accessible().set_name("Note text")
         scroller.add(self.view)
+        self.footer = Gtk.Box(spacing=4)
+        self.footer.get_style_context().add_class("bottom-panel")
+        self.footer.set_margin_start(20)
+        self.footer.set_margin_end(20)
+        self.footer.set_margin_bottom(8)
+        layout.pack_end(self.footer, False, False, 0)
         self.info_button = self.button("i", "Info", self.show_info)
         self.info_button.get_style_context().add_class("info-button")
-        self.info_button.set_halign(Gtk.Align.END)
-        self.info_button.set_valign(Gtk.Align.END)
-        self.info_button.set_margin_end(22)
-        self.info_button.set_margin_bottom(20)
-        overlay.add_overlay(self.info_button)
+        self.info_button.set_halign(Gtk.Align.START)
+        self.info_button.set_valign(Gtk.Align.CENTER)
+        self.footer.pack_start(self.info_button, False, False, 0)
+        self.bottom_controls = Gtk.Box(spacing=4)
+        self.bottom_controls.get_style_context().add_class("bottom-controls")
+        self.bottom_controls.set_halign(Gtk.Align.END)
+        self.bottom_controls.set_valign(Gtk.Align.CENTER)
+        for button in (self.notes_button, self.theme_button, self.format_button):
+            self.bottom_controls.pack_start(button, False, False, 0)
+        self.footer.pack_end(self.bottom_controls, False, False, 0)
 
         self.buffer.create_tag("bold", weight=Pango.Weight.BOLD)
         self.buffer.create_tag("italic", style=Pango.Style.ITALIC)
         self.buffer.create_tag("strikethrough", strikethrough=True)
+        self.buffer.create_tag("list", left_margin=36, indent=-20)
         for level, size in enumerate((38, 28, 22, 21, 20, 19), 1):
             self.buffer.create_tag(f"heading{level}", weight=Pango.Weight.SEMIBOLD, scale=size / 19)
         self.marker_tag = self.buffer.create_tag("marker", weight=Pango.Weight.NORMAL,
@@ -237,6 +266,12 @@ class Editor(Gtk.ApplicationWindow):
         self.view.grab_focus()
         if store.recovered:
             self.recovery_source = GLib.idle_add(self.recovery_notice)
+        installed = store.root / "application"
+        if Path(__file__).resolve().parent == installed.resolve():
+            self.update_client = UpdateClient(installed)
+            self.update_worker = UpdateWorker(GLib.idle_add, GLib.source_remove)
+            self.update_source = GLib.timeout_add_seconds(3, self.initial_update_check)
+            self.update_repeat_source = GLib.timeout_add_seconds(6 * 60 * 60, self.periodic_update_check)
 
     @staticmethod
     def button(icon, tooltip, callback):
@@ -491,18 +526,21 @@ class Editor(Gtk.ApplicationWindow):
                 if key in self.tab_pages:
                     continue
                 page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+                page.get_style_context().add_class("note-page")
                 tab = Gtk.Box(spacing=4)
                 tab.get_style_context().add_class("title-tab")
                 label = Gtk.Button(label=self.tab_titles.get(key) or "Untitled")
                 label.set_relief(Gtk.ReliefStyle.NONE)
                 label.set_tooltip_text("Title")
                 label.get_child().set_ellipsize(Pango.EllipsizeMode.END)
-                label.get_child().set_xalign(0)
+                label.get_child().set_xalign(.5)
                 label.connect("clicked", lambda _, note_id=key: self.open_note(note_id))
                 tab.pack_start(label, True, True, 0)
                 close = self.button("close", "Close tab", lambda _, note_id=key: self.close_tab(note_id))
                 close.get_style_context().remove_class("chrome-button")
                 close.get_style_context().add_class("close-tab")
+                close.get_child().set_pixel_size(12)
+                self.tab_closes[key] = close
                 tab.pack_end(close, False, False, 0)
                 self.tab_strip.pack_start(tab, True, True, 0)
                 self.tab_widgets[key] = tab
@@ -520,6 +558,7 @@ class Editor(Gtk.ApplicationWindow):
                 if key not in self.open_tabs:
                     self.notebook.remove_page(self.notebook.page_num(self.tab_pages.pop(key)))
                     self.tab_labels.pop(key, None)
+                    self.tab_closes.pop(key, None)
                     self.tab_widgets.pop(key).destroy()
             self.notebook.set_current_page(self.notebook.page_num(active))
             for key, label in self.tab_labels.items():
@@ -528,6 +567,9 @@ class Editor(Gtk.ApplicationWindow):
                 context = tab.get_style_context()
                 context.remove_class("active")
                 label.show()
+                close = self.tab_closes[key]
+                close.set_no_show_all(key != self.note["id"])
+                close.set_visible(key == self.note["id"])
                 if key == self.note["id"]:
                     context.add_class("active")
                     label.set_no_show_all(True)
@@ -779,7 +821,7 @@ class Editor(Gtk.ApplicationWindow):
         except StorageError as exc:
             self.report(exc)
             return
-        popover, box = self.popover(self.notes_button, 300)
+        popover, box = self.popover(self.notes_button, 300, above=True)
         scroller = Gtk.ScrolledWindow()
         scroller.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
         scroller.set_max_content_height(320)
@@ -838,13 +880,16 @@ class Editor(Gtk.ApplicationWindow):
         finally:
             dialog.destroy()
 
-    def apply_format(self, marker=None, level=None):
+    def apply_format(self, marker=None, level=None, list_type=None):
         selection = self.buffer.get_selection_bounds()
         if selection:
             first, last = (iterator.get_offset() for iterator in selection)
         else:
             first = last = self.buffer.get_iter_at_mark(self.buffer.get_insert()).get_offset()
-        if level is not None:
+        if list_type is not None:
+            first, last, replacement, selected_start, selected_end = list_edit(
+                self.text(), first, last, list_type)
+        elif level is not None:
             first, last, replacement = heading_edit(self.text(), first, last, level)
             selected_start = 0 if selection else len(replacement)
             selected_end = len(replacement)
@@ -864,8 +909,42 @@ class Editor(Gtk.ApplicationWindow):
             popover.popdown()
         self.view.grab_focus()
 
+    def edit_list_line(self, task=False):
+        if self.buffer.get_selection_bounds():
+            return False
+        cursor = self.buffer.get_iter_at_mark(self.buffer.get_insert())
+        first = cursor.copy()
+        first.set_line_offset(0)
+        last = cursor.copy()
+        if not last.ends_line():
+            last.forward_to_line_end()
+        line = self.buffer.get_text(first, last, True)
+        relative = cursor.get_offset() - first.get_offset()
+        edit = toggle_task(line) if task else list_enter(line, relative)
+        if edit is None:
+            return False
+        start, end, replacement = edit
+        base = first.get_offset()
+        # Completing an item leaves the caret in its content, not at the prefix.
+        caret = (max(len(replacement), relative + len(replacement) - (end - start))
+                 if task else start + len(replacement))
+        self.buffer.begin_user_action()
+        try:
+            self.buffer.delete(self.buffer.get_iter_at_offset(base + start),
+                               self.buffer.get_iter_at_offset(base + end))
+            self.buffer.insert(self.buffer.get_iter_at_offset(base + start), replacement)
+            self.buffer.place_cursor(self.buffer.get_iter_at_offset(base + caret))
+        finally:
+            self.buffer.end_user_action()
+        if task:
+            self.flush()
+            for popover in self.popovers:
+                popover.popdown()
+            self.view.grab_focus()
+        return True
+
     def show_formatting(self, *_):
-        popover, box = self.popover(self.format_button, 272)
+        popover, box = self.popover(self.format_button, 272, above=True)
         inline = Gtk.Box(spacing=6, homogeneous=True)
         box.pack_start(inline, False, False, 0)
         self.format_action(inline, "<b>B</b>  Bold", lambda *_: self.apply_format(marker="**"), "Bold")
@@ -880,6 +959,17 @@ class Editor(Gtk.ApplicationWindow):
         for level in range(1, 7):
             self.format_action(headings, f"H{level}", lambda _, value=level: self.apply_format(level=value),
                                f"Heading {level}")
+        self.section_label(box, "LISTS")
+        lists = Gtk.Box(spacing=4, homogeneous=True)
+        box.pack_start(lists, False, False, 0)
+        for label, kind, hint in (("• Bullets", "bullet", "Bulleted list"),
+                                  ("1. Numbers", "number", "Numbered list"),
+                                  ("☐ Tasks", "task", "Checklist")):
+            self.format_action(lists, label, lambda _, value=kind: self.apply_format(list_type=value), hint)
+        tasks = Gtk.Box()
+        box.pack_start(tasks, False, False, 4)
+        self.format_action(tasks, "Check / uncheck task", lambda *_: self.edit_list_line(task=True),
+                           "Check or uncheck task (Ctrl+Enter)")
         self.section_label(box, "EDITOR FONT")
         fonts = Gtk.Box(spacing=6)
         box.pack_start(fonts, False, False, 0)
@@ -984,23 +1074,93 @@ class Editor(Gtk.ApplicationWindow):
             box.pack_start(label, False, False, 0)
         self.section_label(box, "SYNTAX")
         for marker, description in (("*text*", "Italic"), ("**text**", "Bold"),
-                                    ("~text~ / ~~text~~", "Strikethrough"), ("# … ######", "Heading 1–6")):
+                                    ("~text~ / ~~text~~", "Strikethrough"), ("# … ######", "Heading 1–6"),
+                                    ("• item / - item", "Bulleted list"), ("1. item", "Numbered list"),
+                                    ("☐ task / - [ ] task", "Checklist")):
             self.info_row(box, marker, description, syntax=True)
         self.section_label(box, "SHORTCUTS")
         for action, shortcut in (("New note", "Ctrl+N"), ("Open file", "Ctrl+O"),
                                  ("Bold", "Ctrl+B"), ("Italic", "Ctrl+I"),
                                  ("Strikethrough", "Ctrl+Shift+X"),
                                  ("Switch / close tab", "Ctrl+Tab / Ctrl+W"),
+                                 ("Bullets / numbers / tasks", "Ctrl+Shift+8 / 7 / 9"),
+                                 ("Check / uncheck task", "Ctrl+Enter"),
                                  ("Quit", "Ctrl+Q"),
                                  ("Undo / Redo", "Ctrl+Z / Ctrl+Shift+Z")):
             self.info_row(box, action, shortcut)
         box.pack_start(Gtk.Separator(), False, False, 0)
+        self.action_button(box, "Check for updates", lambda *_: self.check_updates(manual=True))
         footer = Gtk.Label(label="Notes stay on this computer.", xalign=0)
         footer.get_style_context().add_class("muted")
         footer.get_style_context().add_class("info-footer")
         box.pack_start(footer, False, False, 0)
         popover.show_all()
         popover.popup()
+
+    def initial_update_check(self):
+        self.update_source = 0
+        self.check_updates()
+        return GLib.SOURCE_REMOVE
+
+    def periodic_update_check(self):
+        self.check_updates()
+        return GLib.SOURCE_CONTINUE
+
+    def update_message(self, title, detail, error=False):
+        dialog = Gtk.MessageDialog(transient_for=self, modal=True,
+                                   message_type=Gtk.MessageType.ERROR if error else Gtk.MessageType.INFO,
+                                   buttons=Gtk.ButtonsType.OK, text=title)
+        dialog.format_secondary_text(detail)
+        try:
+            dialog.run()
+        finally:
+            dialog.destroy()
+
+    def check_updates(self, *_args, manual=False):
+        if self.update_worker is None:
+            if manual:
+                self.update_message("Updates", "Install justnotes using ./install.sh to enable app updates.")
+            return
+        started = self.update_worker.start(
+            self.update_client.check,
+            lambda update, error: self.update_checked(update, error, manual))
+        if manual and not started:
+            self.update_message("Updates", "An update check or installation is already in progress.")
+
+    def update_checked(self, update, error, manual=False):
+        if error is not None:
+            if manual:
+                self.update_message("Could not check for updates", str(error), error=True)
+            return
+        if update is None:
+            if manual:
+                self.update_message("You're up to date", "You have the latest version of justnotes.")
+            return
+        dialog = Gtk.MessageDialog(transient_for=self, modal=True, message_type=Gtk.MessageType.QUESTION,
+                                   buttons=Gtk.ButtonsType.NONE, text="Update justnotes?")
+        dialog.format_secondary_text(update.summary + "\n\nThe app will restart after updating. Your notes will be saved.")
+        dialog.add_button("Later", Gtk.ResponseType.CANCEL)
+        dialog.add_button("Update and restart", Gtk.ResponseType.ACCEPT)
+        dialog.set_default_response(Gtk.ResponseType.CANCEL)
+        try:
+            accepted = dialog.run() == Gtk.ResponseType.ACCEPT
+        finally:
+            dialog.destroy()
+        if accepted and self.flush():
+            self.update_worker.start(lambda cancelled: self.update_client.install(update, cancelled),
+                                     self.update_installed)
+
+    def update_installed(self, _value, error):
+        if error is not None:
+            self.update_message("Could not update justnotes", str(error), error=True)
+            return
+        self.configured()
+        if not self.flush():
+            self.update_message("Update installed", "Save your note, then close and reopen justnotes to finish.")
+            return
+        application = self.get_application()
+        application.restart_command = [str(self.update_client.directory / "justnotes")]
+        application.quit()
 
     def apply_appearance(self):
         mode = self.preferences.get("editor_theme", "light")
@@ -1022,11 +1182,19 @@ class Editor(Gtk.ApplicationWindow):
 
     def key_pressed(self, _widget, event):
         modifiers = event.state & Gtk.accelerator_get_default_mod_mask()
-        if not modifiers & Gdk.ModifierType.CONTROL_MASK:
-            return False
-        key = Gdk.keyval_name(event.keyval).lower()
+        control = bool(modifiers & Gdk.ModifierType.CONTROL_MASK)
         shift = bool(modifiers & Gdk.ModifierType.SHIFT_MASK)
-        if key == "q":
+        key = (Gdk.keyval_name(event.keyval) or "").lower()
+        if key in ("return", "kp_enter") and self.view.has_focus() and not shift:
+            if not modifiers or modifiers == Gdk.ModifierType.CONTROL_MASK:
+                return self.edit_list_line(task=control)
+        if not control:
+            return False
+        if shift and self.view.has_focus() and key in ("7", "8", "9", "ampersand", "asterisk", "parenleft"):
+            kind = {"7": "number", "ampersand": "number", "8": "bullet", "asterisk": "bullet",
+                    "9": "task", "parenleft": "task"}[key]
+            self.apply_format(list_type=kind)
+        elif key == "q":
             self.request_quit()
         elif key == "w":
             self.close_tab(self.note["id"])
@@ -1093,7 +1261,10 @@ class Editor(Gtk.ApplicationWindow):
             self.titlebar_background.close()
         if self.system_theme:
             self.system_theme.close()
-        for name in ("geometry_source", "style_source", "scroll_source", "save_source", "recovery_source"):
+        if self.update_worker is not None:
+            self.update_worker.close()
+        for name in ("geometry_source", "style_source", "scroll_source", "save_source", "recovery_source",
+                     "update_source", "update_repeat_source"):
             source = getattr(self, name)
             if source:
                 GLib.source_remove(source)
@@ -1113,6 +1284,7 @@ class Editor(Gtk.ApplicationWindow):
         self.tab_pages.clear()
         self.tab_labels.clear()
         self.tab_widgets.clear()
+        self.tab_closes.clear()
         Gtk.StyleContext.remove_provider_for_screen(self.get_screen(), self.css)
 
 
@@ -1120,6 +1292,7 @@ class Justnotes(Gtk.Application):
     def __init__(self):
         super().__init__(application_id=APP_ID, flags=Gio.ApplicationFlags.FLAGS_NONE)
         self.store = None
+        self.restart_command = None
 
     def do_activate(self):
         window = self.get_active_window()
@@ -1143,6 +1316,18 @@ class Justnotes(Gtk.Application):
         if self.store is not None:
             self.store.close()
         Gtk.Application.do_shutdown(self)
+        if self.restart_command is not None:
+            try:
+                # Wait for this process to release its single-instance bus name.
+                restart = ("import os, sys, time\n"
+                           "deadline = time.monotonic() + 10\n"
+                           "while os.getppid() == int(sys.argv[1]) and time.monotonic() < deadline:\n"
+                           "    time.sleep(0.1)\n"
+                           "os.execv(sys.argv[2], sys.argv[2:])\n")
+                subprocess.Popen([sys.executable, "-c", restart, str(os.getpid()), *self.restart_command],
+                                 start_new_session=True)
+            except OSError as exc:
+                print(f"Update installed. Reopen justnotes from your applications menu: {exc}", file=sys.stderr)
 
 
 def main():

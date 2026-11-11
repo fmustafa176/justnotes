@@ -36,7 +36,8 @@ class InstallationTests(unittest.TestCase):
             self.assertTrue(os.access(binary / "justnotes", os.X_OK))
             self.assertTrue((data / "justnotes/application/system_theme.py").is_file())
             installed = data / "justnotes/application"
-            for filename in ("app.py", "appearance.py", "system_theme.py", "storage.py", "formatting.py"):
+            self.assertTrue((installed / ".update-revision").is_file())
+            for filename in ("app.py", "appearance.py", "system_theme.py", "storage.py", "formatting.py", "updates.py"):
                 self.assertEqual((installed / filename).read_bytes(), (source / filename).read_bytes())
             # Exercise the installed controller, not modules imported from the
             # source tree: this catches testing a different copy than we ship.

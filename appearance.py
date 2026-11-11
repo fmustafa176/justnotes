@@ -44,12 +44,19 @@ EDITOR_COLORS = {
 }
 
 
-def titlebar_stylesheet(color):
-    """Change only the native header background's alpha, never widget opacity."""
+def titlebar_stylesheet(color, translucent=True):
+    """Paint a rounded native-colored frame without fading text or controls."""
     red, green, blue = (round(channel * 255) for channel in (color.red, color.green, color.blue))
-    alpha = min(color.alpha, 0.84)
-    return ("headerbar.justnotes-translucent-titlebar { background-image: none; "
-            f"background-color: rgba({red}, {green}, {blue}, {alpha:.4f}); }}")
+    alpha = min(color.alpha, 0.84) if translucent else 1.0
+    background = f"rgba({red}, {green}, {blue}, {alpha:.4f})"
+    return (
+        "headerbar.justnotes-translucent-titlebar { background-image: none; "
+        f"background-color: {background}; border-radius: 28px 28px 0 0; border-bottom: none; }} "
+        f".window-shell {{ background-image: none; background-color: {background}; "
+        "border-radius: 0 0 28px 28px; } "
+        "window.maximized headerbar.justnotes-translucent-titlebar, "
+        "window.fullscreen headerbar.justnotes-translucent-titlebar, "
+        "window.maximized .window-shell, window.fullscreen .window-shell { border-radius: 0; }")
 
 
 def stylesheet(editor_theme="light"):
@@ -57,32 +64,42 @@ def stylesheet(editor_theme="light"):
     colors = EDITOR_COLORS[editor_theme]
     editor = """
     window.justnotes-window { background-color: transparent; background-image: none; }
-    .editor-surface { background-color: %(background)s; color: %(foreground)s; }
+    window.justnotes-window decoration { border-radius: 28px; }
+    window.justnotes-window.maximized decoration,
+    window.justnotes-window.fullscreen decoration { border-radius: 0; }
+    .window-shell .tab-scroller,
+    .window-shell .tab-scroller > viewport,
+    .window-shell notebook.editor-tabs,
+    .window-shell notebook.editor-tabs > stack,
+    .window-shell .note-page { background: transparent; border: none; box-shadow: none; }
+    .editor-surface { background-color: %(background)s; color: %(foreground)s; border-radius: 22px; }
+    .window-shell .bottom-panel, .window-shell .bottom-controls { background: transparent; }
     .editor-surface textview, .editor-surface textview text {
         background-color: %(background)s; color: %(foreground)s; caret-color: %(accent)s;
     }
-    .editor-surface entry.note-title,
-    .editor-surface entry.note-title:focus,
-    .editor-surface entry.note-title:backdrop {
-        background-color: transparent; background-image: none;
-        color: %(foreground)s; caret-color: %(accent)s;
-        border: none; box-shadow: none;
+    .window-shell entry.note-title,
+    .window-shell entry.note-title:focus,
+    .window-shell entry.note-title:backdrop {
+        background: transparent; color: @theme_fg_color;
+        caret-color: @theme_fg_color; border: none; box-shadow: none;
+        padding: 0 12px; min-width: 0; font-weight: normal;
     }
     .editor-surface button.chrome-button { color: %(muted)s; }
     .editor-surface button.chrome-button:hover { color: %(foreground)s; }
-    .editor-surface .title-tab {
-        border-bottom: 2px solid transparent;
+    .window-shell .tab-track {
+        background-color: alpha(@theme_fg_color, 0.06); border-radius: 20px;
     }
-    .editor-surface .title-tab.active {
-        border-bottom-color: %(accent)s;
+    .window-shell .title-tab {
+        background: transparent; border: none; border-radius: 20px; min-height: 38px;
     }
-    .editor-surface .title-tab > button {
-        color: %(muted)s; background: transparent; box-shadow: none;
-        border: none; padding: 0 8px; min-width: 0;
+    .window-shell .title-tab.active { background-color: alpha(@theme_fg_color, 0.12); }
+    .window-shell .title-tab > button {
+        color: @theme_fg_color; background: transparent; box-shadow: none;
+        border: none; border-radius: 20px; padding: 0 12px; min-width: 0;
     }
-    .editor-surface .title-tab > entry { padding: 0 8px; min-width: 0; }
-    .editor-surface .title-tab button.close-tab {
-        color: %(muted)s; padding: 0; min-width: 20px; min-height: 20px;
+    .window-shell .title-tab > button:hover { background-color: alpha(@theme_fg_color, 0.06); }
+    .window-shell .title-tab button.close-tab {
+        padding: 0; margin: 0 6px 0 0; min-width: 24px; min-height: 24px;
     }
     .editor-surface textview text selection, .editor-surface entry.note-title selection {
         background-color: %(selection)s; color: %(foreground)s;
@@ -91,7 +108,6 @@ def stylesheet(editor_theme="light"):
     return editor + """
     .justnotes-surface button.delete-note, .justnotes-surface button.delete-note image { color: #e53935; }
     .justnotes-surface button.delete-note:hover { background-color: rgba(229,57,53,0.12); }
-    .justnotes-window entry.note-title { font-weight: 600; }
     .justnotes-window button.chrome-button {
         min-width: 36px; min-height: 36px; padding: 0;
     }

@@ -25,7 +25,7 @@ class BufferEditor:
                      "set_editor_font", "choose_font", "toggle_markers", "toggle_editor_theme", "delete_note",
                      "cache_current_tab", "update_tab_title", "restore_scroll", "close_tab", "switch_tab",
                      "request_quit", "request_delete_note", "tab_switched", "schedule_save", "autosave",
-                     "before_insert", "before_delete", "mark_style_dirty"):
+                     "before_insert", "before_delete", "mark_style_dirty", "edit_list_line"):
             locals()[name] = getattr(Editor, name)
 
     def __init__(self, store):
@@ -63,7 +63,7 @@ class BufferEditor:
         self.close = Mock()
         self.configured = Mock()
         self.buffer = Gtk.TextBuffer()
-        for tag in ("bold", "italic", "strikethrough", "marker", *(f"heading{i}" for i in range(1, 7))):
+        for tag in ("bold", "italic", "strikethrough", "marker", "list", *(f"heading{i}" for i in range(1, 7))):
             self.buffer.create_tag(tag)
         self.marker_tag = self.buffer.get_tag_table().lookup("marker")
         self.buffer.connect("insert-text", self.before_insert)
@@ -164,11 +164,11 @@ class EditingTests(unittest.TestCase):
     def test_incremental_styling_matches_full_styling_across_edits(self):
         import random
         generator = random.Random(74)
-        self.type_text("# Title\n**bold** and *italic*\n~~gone~~\nplain 🌙", flush=False)
+        self.type_text("# Title\n**bold** and *italic*\n~~gone~~\nplain 🌙\n• item\n1. number\n☑ done", flush=False)
         self.clear_idle()
         self.editor.restyle(full=True)
         reference = Gtk.TextBuffer()
-        names = ("bold", "italic", "strikethrough", "marker", *(f"heading{i}" for i in range(1, 7)))
+        names = ("bold", "italic", "strikethrough", "marker", "list", *(f"heading{i}" for i in range(1, 7)))
         for name in names:
             reference.create_tag(name)
         expected = SimpleNamespace(buffer=reference, preferences=self.editor.preferences,
@@ -452,6 +452,87 @@ class EditingTests(unittest.TestCase):
         self.editor.undo(redo=True)
         self.assertEqual(self.editor.text(), "first new")
 
+    def enter(self, control=False, shift=False):
+        event = SimpleNamespace(keyval=Gdk.keyval_from_name("Return"),
+                                state=(Gdk.ModifierType.CONTROL_MASK if control else 0) |
+                                      (Gdk.ModifierType.SHIFT_MASK if shift else 0))
+        return self.editor.key_pressed(None, event)
+
+    def test_list_actions_toggle_selected_lines_as_one_undo_step(self):
+        self.type_text("one\ntwo")
+        for kind, expected in (("bullet", "• one\n• two"),
+                               ("number", "1. one\n2. two"), ("task", "☐ one\n☐ two")):
+            self.editor.buffer.select_range(*self.editor.buffer.get_bounds())
+            self.editor.apply_format(list_type=kind)
+            self.assertEqual(self.editor.text(), expected)
+            self.assertEqual(self.store.load_note(self.editor.note["id"])["text"], expected)
+            self.editor.undo()
+            self.assertEqual(self.editor.text(), "one\ntwo")
+            self.editor.undo(redo=True)
+            self.editor.buffer.select_range(*self.editor.buffer.get_bounds())
+            self.editor.apply_format(list_type=kind)
+            self.assertEqual(self.editor.text(), "one\ntwo")
+
+    def test_list_enter_continues_and_leaves_an_empty_item(self):
+        self.type_text("9. nine")
+        self.assertTrue(self.enter())
+        self.assertEqual(self.editor.text(), "9. nine\n10. ")
+        self.assertTrue(self.enter())
+        self.assertEqual(self.editor.text(), "9. nine\n")
+        self.editor.undo()
+        self.assertEqual(self.editor.text(), "9. nine\n10. ")
+        self.editor.undo()
+        self.assertEqual(self.editor.text(), "9. nine")
+
+    def test_list_enter_splits_content_at_caret(self):
+        self.type_text("• hello world")
+        self.editor.buffer.place_cursor(self.editor.buffer.get_iter_at_offset(8))
+        self.assertTrue(self.enter())
+        self.assertEqual(self.editor.text(), "• hello \n• world")
+
+    def test_checking_task_preserves_caret_saves_and_undoes(self):
+        self.type_text("- [ ] done")
+        self.assertTrue(self.enter(control=True))
+        self.assertEqual(self.editor.text(), "☑ done")
+        self.assertEqual(self.editor.buffer.get_iter_at_mark(self.editor.buffer.get_insert()).get_offset(), 6)
+        self.assertEqual(self.store.load_note(self.editor.note["id"])["text"], "☑ done")
+        self.clear_idle()
+        self.editor.restyle()
+        strike = self.editor.buffer.get_tag_table().lookup("strikethrough")
+        self.assertTrue(self.editor.buffer.get_iter_at_offset(3).has_tag(strike))
+        self.editor.undo()
+        self.assertEqual(self.editor.text(), "- [ ] done")
+
+    def test_list_shortcuts_handle_shifted_key_symbols(self):
+        self.type_text("item")
+        for key, expected in (("asterisk", "• item"), ("ampersand", "1. item"), ("parenleft", "☐ item")):
+            self.press(key, shift=True)
+            self.assertEqual(self.editor.text(), expected)
+            self.editor.undo()
+            self.assertEqual(self.editor.text(), "item")
+
+    def test_enter_does_not_intercept_plain_text_selection_or_title(self):
+        self.type_text("plain")
+        self.assertFalse(self.enter())
+        self.editor.apply_format(list_type="bullet")
+        self.assertFalse(self.enter(shift=True))
+        self.editor.buffer.select_range(*self.editor.buffer.get_bounds())
+        self.assertFalse(self.enter())
+        self.editor.buffer.place_cursor(self.editor.buffer.get_end_iter())
+        self.editor.view.has_focus.return_value = False
+        self.assertFalse(self.enter())
+
+    def test_checklist_and_inline_styles_survive_marker_visibility_toggle(self):
+        self.type_text("☑ **done**")
+        self.clear_idle()
+        self.editor.restyle()
+        self.assertEqual(self.editor.buffer.get_text(*self.editor.buffer.get_bounds(), False), "☑ done")
+        checkbox = Mock()
+        checkbox.get_active.return_value = False
+        self.editor.toggle_markers(checkbox)
+        self.assertEqual(self.editor.text(), "☑ **done**")
+        self.assertEqual(self.editor.buffer.get_text(*self.editor.buffer.get_bounds(), False), "☑ **done**")
+
     def test_formatting_is_one_undo_action(self):
         self.type_text("hello")
         self.editor.buffer.select_range(self.editor.buffer.get_start_iter(), self.editor.buffer.get_end_iter())
@@ -677,6 +758,24 @@ class WindowTests(unittest.TestCase):
                 window.title_entry.set_text("renamed")
                 self.assertEqual(window.title_entry.get_tooltip_text(), "Title")
                 self.assertEqual(window.notes_button.get_tooltip_text(), "Notes")
+                self.assertTrue(window.shell.get_style_context().has_class("window-shell"))
+                self.assertFalse(window.shell.get_style_context().has_class("editor-surface"))
+                self.assertTrue(window.overlay.get_style_context().has_class("editor-surface"))
+                self.assertEqual(window.notebook.get_margin_start(), 10)
+                self.assertEqual(window.notebook.get_margin_end(), 10)
+                self.assertEqual(window.info_button.get_halign(), Gtk.Align.START)
+                self.assertEqual(window.info_button.get_parent(), window.footer)
+                self.assertEqual(window.bottom_controls.get_halign(), Gtk.Align.END)
+                self.assertEqual(window.bottom_controls.get_parent(), window.footer)
+                self.assertEqual(window.bottom_controls.get_children(),
+                                 [window.notes_button, window.theme_button, window.format_button])
+                self.assertEqual(window.get_titlebar().get_custom_title(), None)
+                for button in (window.notes_button, window.theme_button, window.format_button):
+                    self.assertEqual(button.get_parent(), window.bottom_controls)
+                self.assertEqual(window.footer.get_parent(), window.shell)
+                self.assertEqual(window.overlay.get_children(), [window.scroller])
+                self.assertEqual(window.scroller.get_margin_bottom(), 12)
+                self.assertTrue(window.footer.get_style_context().has_class("bottom-panel"))
                 extra = store.create_note(title="temporary", text="remove this")
                 window.show_notes()
                 def descendants(widget):
@@ -705,6 +804,9 @@ class WindowTests(unittest.TestCase):
                 self.assertFalse(window.notebook.get_show_tabs())
                 self.assertEqual(window.title_entry.get_parent(), window.tab_widgets[second])
                 self.assertFalse(window.tab_labels[second].get_visible())
+                self.assertTrue(window.tab_closes[second].get_visible())
+                self.assertFalse(window.tab_closes[original].get_visible())
+                self.assertEqual(window.title_entry.get_alignment(), .5)
                 self.assertTrue(window.tab_labels[original].get_visible())
                 # First click selects an inactive title and leaves focus in the editor.
                 window.tab_labels[original].clicked()
@@ -739,8 +841,10 @@ class WindowTests(unittest.TestCase):
                 if window.titlebar_background:
                     window.titlebar_background.refresh()
                 titlebar_color = window.get_titlebar().get_style_context().get_background_color(Gtk.StateFlags.NORMAL)
-                if window.titlebar_background:
+                if window.titlebar_background.translucent:
                     self.assertLessEqual(titlebar_color.alpha, 0.841)
+                    shell_color = window.shell.get_style_context().get_background_color(Gtk.StateFlags.NORMAL)
+                    self.assertAlmostEqual(shell_color.alpha, titlebar_color.alpha, places=3)
                 self.assertEqual(window.get_titlebar().get_opacity(), 1)
                 self.assertEqual(window.get_opacity(), 1)
                 self.assertEqual(window.view.get_style_context().get_background_color(Gtk.StateFlags.NORMAL).alpha, 1)
@@ -817,12 +921,14 @@ class GeometryControllerTests(unittest.TestCase):
 class LifecycleTests(unittest.TestCase):
     def test_destroy_releases_timers_signals_popovers_and_cached_history(self):
         window = SimpleNamespace(
-            titlebar_background=Mock(), system_theme=Mock(), geometry_source=10, style_source=11,
+            titlebar_background=Mock(), system_theme=Mock(), update_worker=Mock(),
+            update_source=0, update_repeat_source=0, geometry_source=10, style_source=11,
             scroll_source=12, save_source=13, recovery_source=14,
             popovers=[Mock()], style_dirty=(object(), object()),
             buffer=Mock(), buffer_handlers=[21, 22, 23],
             tab_states={"note": {"history": ["big text"]}}, history=["text"],
             tab_pages={"note": Mock()}, tab_labels={"note": Mock()}, tab_widgets={"note": Mock()},
+            tab_closes={"note": Mock()},
             get_screen=Mock(), css=Mock())
         popover = window.popovers[0]
         with patch("app.GLib.source_remove") as remove, \

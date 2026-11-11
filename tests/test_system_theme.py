@@ -128,3 +128,20 @@ class TitlebarBackgroundTests(unittest.TestCase):
         self.assertEqual(self.titlebar.disconnect.call_count, 3)
         self.effect.close()
         self.assertEqual(self.titlebar.disconnect.call_count, 3)
+
+
+    def test_frame_uses_same_provider_and_releases_it_on_close(self):
+        shell = Mock()
+        effect = TitlebarBackground(self.titlebar, shell=shell)
+        self.addCleanup(effect.close)
+        shell.get_style_context().add_provider.assert_called_once_with(
+            effect.provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+        self.assertIn(".window-shell", effect.last_css)
+        self.assertIn("border-radius: 28px 28px 0 0", effect.last_css)
+        effect.close()
+        shell.get_style_context().remove_provider.assert_called_once_with(effect.provider)
+
+    def test_noncomposited_desktop_uses_solid_frame(self):
+        effect = TitlebarBackground(self.titlebar, shell=Mock(), translucent=False)
+        self.addCleanup(effect.close)
+        self.assertIn("rgba(51, 102, 153, 1.0000)", effect.last_css)

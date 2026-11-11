@@ -22,6 +22,10 @@ class Inline:
 
 _DELIMITERS = re.compile(r"\*+|~+")
 
+_LIST = re.compile(
+    r"^(?P<indent>[ \t]*)(?:(?P<task>(?:[-+*][ \t]+)?\[(?P<checked>[ xX])\]|[☐☑☒])"
+    r"|(?P<number>[0-9]{1,9})(?P<delimiter>[.)])|(?P<bullet>[-+*•]))[ \t]+", re.MULTILINE)
+
 
 def inline_runs(text, offset=0):
     # Index possible closing delimiters once per range. Searching the suffix
@@ -78,6 +82,13 @@ def spans(text):
     for match in re.finditer(r"^(#{1,6})[ \t]+([^\n]*)", text, re.MULTILINE):
         yield "marker", match.start(), match.start(2)
         yield f"heading{len(match[1])}", match.start(2), match.end(2)
+    for match in _LIST.finditer(text):
+        end = text.find("\n", match.end())
+        if end == -1:
+            end = len(text)
+        yield "list", match.start(), end
+        if match["task"] and task_checked(match) and match.end() < end:
+            yield "strikethrough", match.end(), end
     for run in inline_runs(text):
         yield "marker", run.start, run.content_start
         yield "marker", run.content_end, run.end
@@ -150,3 +161,69 @@ def heading_edit(text, start, end, level):
     prefix = "" if remove else "#" * level + " "
     replacement = "\n".join(prefix + re.sub(r"^#{1,6}[ \t]+", "", line) for line in lines)
     return first, last, replacement
+
+
+
+
+def list_kind(match):
+    return "task" if match["task"] else "number" if match["number"] else "bullet"
+
+
+def task_checked(match):
+    return match["checked"] in ("x", "X") or match["task"] in ("☑", "☒")
+
+
+def list_edit(text, start, end, kind):
+    """Toggle selected lines as bullets, consecutive numbers or checkboxes."""
+    if kind not in ("bullet", "number", "task"):
+        raise ValueError("Unknown list type")
+    first = text.rfind("\n", 0, start) + 1
+    selected_end = end - 1 if end > start and text[end - 1:end] == "\n" else end
+    last = text.find("\n", selected_end)
+    if last == -1:
+        last = len(text)
+    lines = text[first:last].split("\n")
+    matches = [_LIST.match(line) for line in lines]
+    remove = all(match and list_kind(match) == kind for match in matches)
+    number = 1
+    if first:
+        previous = text.rfind("\n", 0, first - 1) + 1
+        preceding = _LIST.match(text[previous:first - 1])
+        if preceding and preceding["number"]:
+            number = int(preceding["number"]) + 1
+    replaced = []
+    caret = 0
+    for index, (line, match) in enumerate(zip(lines, matches)):
+        indent = match["indent"] if match else re.match(r"[ \t]*", line)[0]
+        old_prefix = match.end() if match else len(indent)
+        content = line[old_prefix:]
+        marker = "" if remove else {"bullet": "• ", "number": f"{number}. ", "task": "☐ "}[kind]
+        prefix = indent + marker
+        replaced.append(prefix + content)
+        if index == 0:
+            caret = len(prefix) + max(0, start - first - old_prefix)
+        number += 1
+    replacement = "\n".join(replaced)
+    return (first, last, replacement, 0 if start != end else min(caret, len(replacement)),
+            len(replacement) if start != end else min(caret, len(replacement)))
+
+
+def list_enter(line, cursor):
+    """Continue a list at the caret, or leave an empty item without a new line."""
+    match = _LIST.match(line)
+    if not match or cursor < match.end():
+        return None
+    if not line[match.end():].strip():
+        return 0, len(line), ""
+    kind = list_kind(match)
+    marker = "☐ " if kind == "task" else (f"{int(match['number']) + 1}{match['delimiter']} "
+                                         if kind == "number" else match["bullet"] + " ")
+    return cursor, cursor, "\n" + match["indent"] + marker
+
+
+def toggle_task(line):
+    match = _LIST.match(line)
+    if not match or list_kind(match) != "task":
+        return None
+    prefix = match["indent"] + ("☐ " if task_checked(match) else "☑ ")
+    return 0, match.end(), prefix

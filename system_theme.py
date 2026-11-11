@@ -93,15 +93,19 @@ def follow_system(settings, system_dark=None):
 
 
 class TitlebarBackground:
-    """Keep native header colors/buttons, with transparency only behind them."""
+    """Use native theme colors for the translucent frame around the editor."""
 
-    def __init__(self, titlebar):
+    def __init__(self, titlebar, shell=None, translucent=True):
+        self.translucent = translucent
+        self.shell_context = shell.get_style_context() if shell is not None else None
         self.titlebar = titlebar
         self.context = titlebar.get_style_context()
         self.context.add_class("justnotes-translucent-titlebar")
         self.provider = Gtk.CssProvider()
         # A widget-local provider cannot recolor the editor or window buttons.
         self.context.add_provider(self.provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+        if self.shell_context is not None:
+            self.shell_context.add_provider(self.provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
         self.last_css = None
         self.pending = 0
         self.closed = False
@@ -142,7 +146,7 @@ class TitlebarBackground:
         self.pending = 0
         if self.closed:
             return GLib.SOURCE_REMOVE
-        css = titlebar_stylesheet(self.native_color())
+        css = titlebar_stylesheet(self.native_color(), self.translucent)
         # Loading a provider may emit style-updated; don't create a redraw loop.
         if css != self.last_css:
             self.last_css = css
@@ -163,3 +167,5 @@ class TitlebarBackground:
             self.titlebar.disconnect(handler)
         self.titlebar_handlers.clear()
         self.context.remove_provider(self.provider)
+        if self.shell_context is not None:
+            self.shell_context.remove_provider(self.provider)

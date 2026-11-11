@@ -93,3 +93,59 @@ class ParserRegressionTests(unittest.TestCase):
     def test_inline_spans_do_not_cross_lines(self):
         found = list(spans("*unfinished\nword*\n**yes**\n~no\nstrike~"))
         self.assertEqual([tag for tag, _, _ in found if tag != "marker"], ["bold"])
+
+
+class ListFormattingTests(unittest.TestCase):
+    def test_bullets_toggle_selected_lines_and_exclude_next_line(self):
+        from formatting import list_edit
+        self.assertEqual(list_edit("one\ntwo\nthree", 0, 8, "bullet"),
+                         (0, 7, "• one\n• two", 0, 11))
+        self.assertEqual(list_edit("• one\n• two", 0, 11, "bullet")[2], "one\ntwo")
+
+    def test_numbered_list_and_conversion_preserve_content(self):
+        from formatting import list_edit
+        self.assertEqual(list_edit("one\ntwo\nthree", 0, 13, "number")[2], "1. one\n2. two\n3. three")
+        self.assertEqual(list_edit("• one\n☐ two", 0, 11, "number")[2], "1. one\n2. two")
+        self.assertEqual(list_edit("1. one\n2. two", 0, 13, "number")[2], "one\ntwo")
+
+    def test_new_numbered_lines_follow_the_preceding_number(self):
+        from formatting import list_edit
+        self.assertEqual(list_edit("12. previous\nnext", 13, 17, "number")[2], "13. next")
+
+    def test_single_caret_stays_with_its_content(self):
+        from formatting import list_edit
+        self.assertEqual(list_edit("hello", 2, 2, "bullet"), (0, 5, "• hello", 4, 4))
+        self.assertEqual(list_edit("• hello", 4, 4, "bullet"), (0, 7, "hello", 2, 2))
+        self.assertEqual(list_edit("", 0, 0, "task"), (0, 0, "☐ ", 2, 2))
+
+    def test_enter_continues_bullets_numbers_and_tasks(self):
+        from formatting import list_enter
+        for line, expected in (("• one", "\n• "), ("- one", "\n- "), ("* one", "\n* "),
+                               ("9. nine", "\n10. "), ("4) four", "\n5) "),
+                               ("☑ done", "\n☐ "), ("- [x] done", "\n☐ "),
+                               ("  • nested", "\n  • ")):
+            with self.subTest(line=line):
+                self.assertEqual(list_enter(line, len(line)), (len(line), len(line), expected))
+        self.assertIsNone(list_enter("plain text", 10))
+        self.assertIsNone(list_enter("1. item", 0))
+
+    def test_enter_leaves_empty_items(self):
+        from formatting import list_enter
+        for line in ("• ", "10. ", "☐ ", "  - [ ]  "):
+            self.assertEqual(list_enter(line, len(line)), (0, len(line), ""))
+
+    def test_tasks_toggle_markdown_and_unicode_forms(self):
+        from formatting import toggle_task
+        self.assertEqual(toggle_task("☐ task"), (0, 2, "☑ "))
+        self.assertEqual(toggle_task("☑ task"), (0, 2, "☐ "))
+        self.assertEqual(toggle_task("- [x] task"), (0, 6, "☐ "))
+        self.assertIsNone(toggle_task("• item"))
+
+    def test_list_spans_keep_markers_visible_and_format_content(self):
+        text = "☑ **done**\n1. next\n- [x] finished"
+        found = list(spans(text))
+        self.assertIn(("list", 0, 10), found)
+        self.assertIn(("strikethrough", 2, 10), found)
+        self.assertIn(("bold", 4, 8), found)
+        self.assertNotIn(("marker", 0, 2), found)
+        self.assertEqual(len([tag for tag, _, _ in found if tag == "list"]), 3)
