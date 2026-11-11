@@ -6,6 +6,10 @@ if ! /usr/bin/python3 -c 'import gi; gi.require_version("Gtk", "3.0"); from gi.r
     echo 'Ubuntu/Debian: sudo apt install python3-gi gir1.2-gtk-3.0' >&2
     exit 1
 fi
+if ! /usr/bin/python3 -c 'import ctypes; ctypes.CDLL("libqrencode.so.4")' 2>/dev/null; then
+    echo 'Install libqrencode first (Ubuntu/Debian: sudo apt install libqrencode4).' >&2
+    exit 1
+fi
 source_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 data_home=${XDG_DATA_HOME:-"$HOME/.local/share"}
 app_dir="$data_home/justnotes/application"
@@ -15,7 +19,7 @@ icon_dir="$data_home/icons/hicolor/scalable/apps"
 app_id=io.github.nightfury.justnotes
 mkdir -p -- "$app_dir/assets/fonts" "$bin_dir" "$desktop_dir" "$icon_dir"
 if [ "$source_dir" != "$app_dir" ]; then
-    for file in app.py storage.py formatting.py appearance.py system_theme.py updates.py justnotes uninstall.sh; do
+    for file in app.py storage.py formatting.py appearance.py system_theme.py updates.py qr.py justnotes uninstall.sh; do
         install -m 644 -- "$source_dir/$file" "$app_dir/$file"
     done
     for file in "$source_dir"/assets/*.svg "$source_dir"/assets/*.png; do

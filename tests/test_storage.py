@@ -183,6 +183,42 @@ class StorageTests(unittest.TestCase):
                 self.store.save_note(note)
         self.assertEqual(self.store.load_note(note["id"])["text"], "saved")
 
+    def test_unchanged_preferences_skip_disk_writes_and_keep_recovery(self):
+        preferences = self.store.load_preferences()
+        self.store.save_preferences(preferences)
+        before = (self.root / "preferences.json.bak").read_bytes()
+        with patch("storage.os.fsync") as sync, patch.object(self.store, "_replace") as replace:
+            self.store.save_preferences(preferences)
+            replace.assert_not_called()
+            sync.assert_not_called()
+        self.assertEqual((self.root / "preferences.json.bak").read_bytes(), before)
+
+    def test_unchanged_save_repairs_missing_or_corrupt_backup(self):
+        preferences = self.store.load_preferences()
+        self.store.save_preferences(preferences)
+        backup = self.root / "preferences.json.bak"
+        for corrupt in (False, True):
+            if corrupt:
+                backup.write_text("broken")
+            else:
+                backup.unlink()
+            self.store.save_preferences(preferences)
+            self.assertEqual(json.loads(backup.read_text()), preferences)
+
+    def test_transparency_survives_restart_and_validates_range(self):
+        preferences = self.store.load_preferences()
+        self.assertEqual(preferences["transparency"], 40)
+        for value in (0, 67, 100):
+            preferences["transparency"] = value
+            self.store.save_preferences(preferences)
+            self.assertEqual(Store(self.root).load_preferences()["transparency"], value)
+        for invalid in (-1, 101, True, 12.5, "40", None):
+            with self.subTest(invalid=invalid), self.assertRaises(StorageError):
+                self.store.save_preferences(dict(preferences, transparency=invalid))
+        del preferences["transparency"]
+        self.store.save_preferences(preferences)
+        self.assertEqual(Store(self.root).load_preferences()["transparency"], 40)
+
     def test_preferences_restart_and_recovery(self):
         preferences = self.store.load_preferences()
         self.assertNotIn("theme", preferences)

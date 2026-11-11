@@ -9,24 +9,38 @@ from appearance import EDITOR_COLORS, modified_label, register_fonts, stylesheet
 
 register_fonts()
 
-import gi
+try:
+    import gi
+    gi.require_version("Gtk", "3.0")
+    gi.require_version("Gdk", "3.0")
+    from gi.repository import Gdk, GdkPixbuf, Gio, GLib, Gtk, Pango
+except (ImportError, ValueError):
+    if __name__ != "__main__":
+        raise
+    print("justnotes needs PyGObject and GTK 3.\n"
+          "Ubuntu/Debian: sudo apt install python3-gi gir1.2-gtk-3.0", file=sys.stderr)
+    raise SystemExit(1)
 
-gi.require_version("Gtk", "3.0")
-gi.require_version("Gdk", "3.0")
-from gi.repository import Gdk, Gio, GLib, Gtk, Pango
-
-from formatting import heading_edit, spans, toggle_inline, list_edit, list_enter, toggle_task
+from formatting import heading_edit, spans, toggle_inline, list_edit, list_enter, toggle_task, task_prefix
 from storage import StorageError, Store
+from qr import QRCodeError, encode_qr, qr_pixels
 from updates import UpdateClient, UpdateWorker
-from system_theme import SystemTheme, TitlebarBackground, follow_system
+from system_theme import SystemTheme, TitlebarBackground, follow_system, initial_color_scheme
 
 APP_ID = "io.github.nightfury.justnotes"
 
 
 def glyph(name):
     """Use the desktop's symbolic icons and its light/dark recoloring."""
+    if name == "qr":
+        image = Gtk.Image.new_from_gicon(
+            Gio.FileIcon.new(Gio.File.new_for_path(str(Path(__file__).parent / "assets/qr-code-symbolic.svg"))),
+            Gtk.IconSize.BUTTON)
+        image.set_pixel_size(20)
+        return image
     icon = {"notes": "text-x-generic-symbolic", "moon": "weather-clear-night-symbolic",
-            "close": "window-close-symbolic"}[name]
+            "new": "list-add-symbolic", "dropdown": "pan-down-symbolic",
+            "settings": "emblem-system-symbolic", "close": "window-close-symbolic"}[name]
     image = Gtk.Image.new_from_icon_name(icon, Gtk.IconSize.BUTTON)
     image.set_pixel_size(20)
     return image
@@ -68,6 +82,8 @@ def trim_history(history):
 
 class Editor(Gtk.ApplicationWindow):
     def __init__(self, application, store):
+        # Set the desktop scheme before GTK builds and styles the window.
+        follow_system(Gtk.Settings.get_default(), initial_color_scheme())
         super().__init__(application=application, title="justnotes")
         self.store = store
         self.preferences = store.load_preferences()
@@ -98,9 +114,11 @@ class Editor(Gtk.ApplicationWindow):
         self.history_index = -1
         self.user_action_depth = 0
         self.restoring = False
+        self.normalizing_task = False
         self.style_source = 0
         self.geometry_source = 0
         self.scroll_source = 0
+        self.cursor_source = 0
         self.save_source = 0
         self.recovery_source = 0
         self.style_dirty = None
@@ -131,6 +149,12 @@ class Editor(Gtk.ApplicationWindow):
             self.set_visual(visual)
         titlebar = Gtk.HeaderBar(title="justnotes", show_close_button=True)
         titlebar.set_has_subtitle(False)
+        self.new_button = self.button("new", "New note", self.new_note)
+        self.open_menu_button = self.button("dropdown", "Open file", self.show_open_menu)
+        header_actions = Gtk.Box(spacing=0)
+        header_actions.pack_start(self.new_button, False, False, 0)
+        header_actions.pack_start(self.open_menu_button, False, False, 0)
+        titlebar.pack_start(header_actions)
         # Leave decoration-layout unset so GTK uses the desktop's button layout.
         self.set_titlebar(titlebar)
         self.titlebar_background = None
@@ -144,7 +168,8 @@ class Editor(Gtk.ApplicationWindow):
         self.shell = layout
         self.add(layout)
         self.titlebar_background = TitlebarBackground(
-            titlebar, shell=layout, translucent=visual is not None and self.is_composited())
+            titlebar, shell=layout, translucent=visual is not None and self.is_composited(),
+            transparency=self.preferences.get("transparency", 40))
         controls = Gtk.Box(spacing=4)
         controls.set_margin_top(4)
         controls.set_margin_bottom(6)
@@ -195,7 +220,9 @@ class Editor(Gtk.ApplicationWindow):
         self.notebook.set_margin_end(10)
         self.notebook.set_margin_bottom(6)
         layout.pack_start(self.notebook, True, True, 0)
-        overlay = Gtk.Overlay()
+        # Gtk.Box paints its CSS background, including the rounded corners.
+        # Controls live in the footer now, so an overlay is no longer needed.
+        overlay = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         self.overlay = overlay
         overlay.get_style_context().add_class("editor-surface")
         scroller = Gtk.ScrolledWindow()
@@ -204,7 +231,7 @@ class Editor(Gtk.ApplicationWindow):
         # Keep rectangular text/scroll widgets inside the rounded opaque card.
         for edge in ("top", "bottom", "start", "end"):
             getattr(scroller, "set_margin_" + edge)(12)
-        overlay.add(scroller)
+        overlay.pack_start(scroller, True, True, 0)
         self.buffer = Gtk.TextBuffer()
         self.view = Gtk.TextView(buffer=self.buffer)
         self.view.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
@@ -228,6 +255,11 @@ class Editor(Gtk.ApplicationWindow):
         self.info_button.set_halign(Gtk.Align.START)
         self.info_button.set_valign(Gtk.Align.CENTER)
         self.footer.pack_start(self.info_button, False, False, 0)
+        self.settings_button = self.button("settings", "Settings", self.show_settings)
+        self.qr_button = self.button("qr", "Generate QR code", self.show_qr)
+        for button in (self.settings_button, self.qr_button):
+            button.set_valign(Gtk.Align.CENTER)
+            self.footer.pack_start(button, False, False, 0)
         self.bottom_controls = Gtk.Box(spacing=4)
         self.bottom_controls.get_style_context().add_class("bottom-controls")
         self.bottom_controls.set_halign(Gtk.Align.END)
@@ -248,13 +280,13 @@ class Editor(Gtk.ApplicationWindow):
         self.css = Gtk.CssProvider()
         Gtk.StyleContext.add_provider_for_screen(self.get_screen(), self.css, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
         self.apply_appearance()
-        follow_system(Gtk.Settings.get_default())
         self.system_theme = SystemTheme(self.system_theme_changed)
         self.title_entry.connect("changed", self.title_changed)
         self.buffer_handlers = [self.buffer.connect(signal, callback) for signal, callback in (
             ("insert-text", self.before_insert), ("delete-range", self.before_delete),
             ("changed", self.text_changed), ("begin-user-action", self.begin_action),
             ("end-user-action", self.end_action))]
+        self.buffer_handlers.append(self.buffer.connect_after("insert-text", self.after_insert))
         self.connect("key-press-event", self.key_pressed)
         self.connect("delete-event", self.close_requested)
         self.connect("configure-event", self.configured)
@@ -348,6 +380,51 @@ class Editor(Gtk.ApplicationWindow):
     def before_insert(self, buffer, location, _text, _length):
         self.mark_style_dirty(location, location)
 
+    def after_insert(self, buffer, location, text, _length):
+        if self.loading or self.restoring or self.normalizing_task or ("]" not in text and text != " "):
+            return
+        first = buffer.get_iter_at_offset(max(0, location.get_offset() - len(text)))
+        first.set_line_offset(0)
+        last = location.copy()
+        if not last.ends_line():
+            last.forward_to_line_end()
+        edits = []
+        base = first.get_offset()
+        for line in buffer.get_text(first, last, True).split("\n"):
+            edit = task_prefix(line)
+            if edit is not None:
+                start, end, replacement = edit
+                edits.append((base + start, base + end, replacement))
+            base += len(line) + 1
+        if not edits:
+            return
+        cursor = buffer.get_iter_at_mark(buffer.get_insert()).get_offset()
+        bound = buffer.get_iter_at_mark(buffer.get_selection_bound()).get_offset()
+        mark = buffer.create_mark(None, location, False)
+        self.normalizing_task = True
+        self.user_action_depth += 1
+        try:
+            for start, end, replacement in reversed(edits):
+                def shifted(offset):
+                    if offset < start:
+                        return offset
+                    if offset <= end:
+                        return start + len(replacement)
+                    return offset + len(replacement) - (end - start)
+                cursor, bound = shifted(cursor), shifted(bound)
+                buffer.delete(buffer.get_iter_at_offset(start), buffer.get_iter_at_offset(end))
+                buffer.insert(buffer.get_iter_at_offset(start), replacement)
+            buffer.select_range(buffer.get_iter_at_offset(cursor), buffer.get_iter_at_offset(bound))
+            # insert-text's iterator is an in/out argument used by GTK after
+            # handlers return; keep it valid after changing the prefixes.
+            location.assign(buffer.get_iter_at_mark(mark))
+        finally:
+            buffer.delete_mark(mark)
+            self.user_action_depth -= 1
+            self.normalizing_task = False
+        if not self.user_action_depth and self.history_index >= 0:
+            self.history[self.history_index] = self.snapshot()
+
     def before_delete(self, buffer, first, last):
         self.mark_style_dirty(first, last)
 
@@ -378,6 +455,26 @@ class Editor(Gtk.ApplicationWindow):
             self.record_history()
         if not self.style_source:
             self.style_source = GLib.idle_add(self.restyle)
+        if self.scroller is not None and not self.cursor_source:
+            self.cursor_source = GLib.idle_add(self.keep_cursor_visible, self.note["id"])
+
+    def keep_cursor_visible(self, note_id):
+        self.cursor_source = 0
+        if note_id != self.note["id"] or not self.view.get_realized() or not self.view.has_focus():
+            return GLib.SOURCE_REMOVE
+        cursor = self.buffer.get_iter_at_mark(self.buffer.get_insert())
+        location = self.view.get_iter_location(cursor)
+        visible = self.view.get_visible_rect()
+        # Use the actual line height, including headings and custom font sizes.
+        space = max(16, location.height + self.view.get_pixels_above_lines() +
+                    self.view.get_pixels_below_lines())
+        if self.view.get_bottom_margin() != space:
+            self.view.set_bottom_margin(space)
+        if visible.height > 0 and (location.y + location.height > visible.y + visible.height - space
+                                   or location.y < visible.y):
+            # GTK defers scrolling this mark until the new layout is validated.
+            self.view.scroll_to_mark(self.buffer.get_insert(), min(.45, space / visible.height), False, 0, 0)
+        return GLib.SOURCE_REMOVE
 
     def restyle(self, full=False):
         self.style_source = 0
@@ -446,6 +543,9 @@ class Editor(Gtk.ApplicationWindow):
                 self.restoring = False
 
     def load_editor(self, note):
+        if self.cursor_source:
+            GLib.source_remove(self.cursor_source)
+            self.cursor_source = 0
         state = self.tab_states.pop(note["id"], None)
         self.loading = True
         self.note = note
@@ -811,6 +911,12 @@ class Editor(Gtk.ApplicationWindow):
         box.pack_start(button, False, False, 0)
         return button
 
+    def show_open_menu(self, *_):
+        popover, box = self.popover(self.open_menu_button, 240)
+        self.action_button(box, "Open file…", self.import_file, "Ctrl+O", keycap=True)
+        popover.show_all()
+        popover.popup()
+
     def show_notes(self, *_):
         if not self.flush():
             return
@@ -920,14 +1026,31 @@ class Editor(Gtk.ApplicationWindow):
             last.forward_to_line_end()
         line = self.buffer.get_text(first, last, True)
         relative = cursor.get_offset() - first.get_offset()
-        edit = toggle_task(line) if task else list_enter(line, relative)
+        normalized = task_prefix(line) if not task else None
+        normalized_caret = None
+        if normalized:
+            _, prefix_end, prefix = normalized
+            normalized_line = prefix + line[prefix_end:]
+            position = max(len(prefix), relative + len(prefix) - prefix_end)
+            follow = list_enter(normalized_line, position)
+            if follow is None:
+                return False
+            start, end, addition = follow
+            normalized_caret = start + len(addition)
+            edit = (0, len(line), normalized_line[:start] + addition + normalized_line[end:])
+        else:
+            edit = toggle_task(line) if task else list_enter(line, relative)
         if edit is None:
             return False
         start, end, replacement = edit
         base = first.get_offset()
         # Completing an item leaves the caret in its content, not at the prefix.
-        caret = (max(len(replacement), relative + len(replacement) - (end - start))
-                 if task else start + len(replacement))
+        if normalized_caret is not None:
+            caret = normalized_caret
+        elif task:
+            caret = max(len(replacement), relative + len(replacement) - (end - start))
+        else:
+            caret = start + len(replacement)
         self.buffer.begin_user_action()
         try:
             self.buffer.delete(self.buffer.get_iter_at_offset(base + start),
@@ -987,14 +1110,65 @@ class Editor(Gtk.ApplicationWindow):
         reset.set_sensitive(self.preferences.get("font") is not None)
         reset.connect("clicked", lambda *_: self.set_editor_font(None))
         fonts.pack_start(reset, False, False, 0)
+        popover.show_all()
+        popover.popup()
+
+    def show_settings(self, *_):
+        popover, box = self.popover(self.settings_button, 280, above=True)
+        self.section_label(box, "TRANSPARENCY")
+        scale = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 0, 100, 1)
+        scale.set_digits(0)
+        scale.set_value(self.preferences.get("transparency", 40))
+        scale.connect("format-value", lambda _, value: f"{value:.0f}%")
+        scale.get_accessible().set_name("Frame transparency")
+        scale.connect("value-changed", self.change_transparency)
+        box.pack_start(scale, False, False, 0)
         hide_markers = Gtk.CheckButton(label="Hide Markdown markers")
         hide_markers.set_active(self.preferences.get("hide_markers", True))
-        hide_markers.set_tooltip_text("Hide markers")
         hide_markers.set_margin_top(8)
         hide_markers.connect("toggled", self.toggle_markers)
         box.pack_start(hide_markers, False, False, 0)
         popover.show_all()
         popover.popup()
+
+    def change_transparency(self, scale):
+        value = round(scale.get_value())
+        if self.preferences.get("transparency", 40) == value:
+            return
+        self.preferences["transparency"] = value
+        self.preferences_dirty = True
+        self.titlebar_background.transparency = value
+        self.titlebar_background.schedule()
+        self.schedule_save()
+
+    def show_qr(self, *_):
+        # Read the live buffer of the active tab, including unsaved edits.
+        text = self.text()
+        try:
+            matrix = encode_qr(text)
+        except QRCodeError as error:
+            dialog = Gtk.MessageDialog(transient_for=self, modal=True,
+                                       message_type=Gtk.MessageType.INFO,
+                                       buttons=Gtk.ButtonsType.CLOSE,
+                                       text="Cannot generate QR code")
+            dialog.format_secondary_text(str(error))
+            dialog.run()
+            dialog.destroy()
+            return
+        pixels, size = qr_pixels(matrix)
+        pixbuf = GdkPixbuf.Pixbuf.new_from_bytes(GLib.Bytes.new(pixels),
+                    GdkPixbuf.Colorspace.RGB, False, 8, size, size, size * 3)
+        dialog = Gtk.Dialog(title="Generate QR code", transient_for=self, modal=True)
+        dialog.add_button("Close", Gtk.ResponseType.CLOSE)
+        box = dialog.get_content_area()
+        box.set_spacing(12)
+        box.set_border_width(16)
+        box.pack_start(Gtk.Image.new_from_pixbuf(pixbuf), False, False, 0)
+        hint = Gtk.Label(label="Scan to read this note on your phone.\nThe text stays offline.")
+        box.pack_start(hint, False, False, 0)
+        dialog.show_all()
+        dialog.run()
+        dialog.destroy()
 
     def toggle_markers(self, button):
         self.preferences["hide_markers"] = button.get_active()
@@ -1076,7 +1250,8 @@ class Editor(Gtk.ApplicationWindow):
         for marker, description in (("*text*", "Italic"), ("**text**", "Bold"),
                                     ("~text~ / ~~text~~", "Strikethrough"), ("# … ######", "Heading 1–6"),
                                     ("• item / - item", "Bulleted list"), ("1. item", "Numbered list"),
-                                    ("☐ task / - [ ] task", "Checklist")):
+                                    ("- [ ] task", "Unchecked task"),
+                                    ("- [x] task", "Checked task")):
             self.info_row(box, marker, description, syntax=True)
         self.section_label(box, "SHORTCUTS")
         for action, shortcut in (("New note", "Ctrl+N"), ("Open file", "Ctrl+O"),
@@ -1263,7 +1438,7 @@ class Editor(Gtk.ApplicationWindow):
             self.system_theme.close()
         if self.update_worker is not None:
             self.update_worker.close()
-        for name in ("geometry_source", "style_source", "scroll_source", "save_source", "recovery_source",
+        for name in ("geometry_source", "style_source", "scroll_source", "cursor_source", "save_source", "recovery_source",
                      "update_source", "update_repeat_source"):
             source = getattr(self, name)
             if source:

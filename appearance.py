@@ -44,10 +44,11 @@ EDITOR_COLORS = {
 }
 
 
-def titlebar_stylesheet(color, translucent=True):
-    """Paint a rounded native-colored frame without fading text or controls."""
-    red, green, blue = (round(channel * 255) for channel in (color.red, color.green, color.blue))
-    alpha = min(color.alpha, 0.84) if translucent else 1.0
+def titlebar_stylesheet(color, translucent=True, transparency=40):
+    """Paint a black translucent frame without fading text or controls."""
+    red, green, blue = ((0, 0, 0) if translucent else
+                        tuple(round(channel * 255) for channel in (color.red, color.green, color.blue)))
+    alpha = 1 - max(0, min(100, transparency)) / 100 if translucent else 1.0
     background = f"rgba({red}, {green}, {blue}, {alpha:.4f})"
     return (
         "headerbar.justnotes-translucent-titlebar { background-image: none; "

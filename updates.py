@@ -21,7 +21,7 @@ REVISION_FILE = ".update-revision"
 MAX_DOWNLOAD = 20 * 1024 * 1024
 MAX_UNPACKED = 100 * 1024 * 1024
 REQUIRED = {"app.py", "updates.py", "storage.py", "formatting.py", "appearance.py",
-            "system_theme.py", "justnotes", "uninstall.sh", "assets/justnotes.svg"}
+            "system_theme.py", "qr.py", "assets/qr-code-symbolic.svg", "justnotes", "uninstall.sh", "assets/justnotes.svg"}
 
 
 class UpdateError(Exception):

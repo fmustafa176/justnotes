@@ -25,7 +25,7 @@ class BufferEditor:
                      "set_editor_font", "choose_font", "toggle_markers", "toggle_editor_theme", "delete_note",
                      "cache_current_tab", "update_tab_title", "restore_scroll", "close_tab", "switch_tab",
                      "request_quit", "request_delete_note", "tab_switched", "schedule_save", "autosave",
-                     "before_insert", "before_delete", "mark_style_dirty", "edit_list_line"):
+                     "before_insert", "before_delete", "mark_style_dirty", "after_insert", "edit_list_line", "keep_cursor_visible", "change_transparency", "show_qr", "show_open_menu"):
             locals()[name] = getattr(Editor, name)
 
     def __init__(self, store):
@@ -40,6 +40,7 @@ class BufferEditor:
         self.tab_labels = {}
         self.scroller = None
         self.scroll_source = 0
+        self.cursor_source = 0
         self.save_source = 0
         self.style_dirty = None
         self.loading = False
@@ -49,6 +50,7 @@ class BufferEditor:
         self.history_index = -1
         self.user_action_depth = 0
         self.restoring = False
+        self.normalizing_task = False
         self.style_source = 0
         self.popovers = []
         self.title_entry = Mock()
@@ -68,6 +70,7 @@ class BufferEditor:
         self.marker_tag = self.buffer.get_tag_table().lookup("marker")
         self.buffer.connect("insert-text", self.before_insert)
         self.buffer.connect("delete-range", self.before_delete)
+        self.buffer.connect_after("insert-text", self.after_insert)
         self.buffer.connect("changed", self.text_changed)
         self.buffer.connect("begin-user-action", self.begin_action)
         self.buffer.connect("end-user-action", self.end_action)
@@ -83,8 +86,55 @@ class EditingTests(unittest.TestCase):
         self.editor = BufferEditor(self.store)
         self.addCleanup(self.clear_idle)
 
+    def test_dropdown_has_only_open_file_and_no_split_controller(self):
+        editor = self.editor
+        editor.open_menu_button = Mock()
+        editor.popover = Mock(return_value=(Mock(), Mock()))
+        editor.import_file = Mock()
+        actions = {}
+        editor.action_button = lambda box, label, callback, *args, **kwargs: actions.update({label: callback})
+        editor.show_open_menu()
+        self.assertEqual(list(actions), ["Open file…"])
+        actions["Open file…"]()
+        editor.import_file.assert_called_once()
+        self.assertFalse(hasattr(Editor, "open_split"))
+
+    def test_transparency_previews_immediately_and_saves_after_drag(self):
+        editor = self.editor
+        editor.titlebar_background = Mock()
+        editor.change_transparency(Mock(get_value=lambda: 60))
+        editor.change_transparency(Mock(get_value=lambda: 70))
+        self.assertEqual(editor.titlebar_background.transparency, 70)
+        self.assertEqual(editor.titlebar_background.schedule.call_count, 2)
+        self.assertTrue(editor.save_source)
+        editor.flush()
+        self.assertEqual(self.store.load_preferences()["transparency"], 70)
+
+    def test_qr_reads_active_buffer_including_unsaved_edits(self):
+        editor = self.editor
+        self.type_text("active note", flush=False)
+        self.store.create_note(text="inactive note")
+        dialog = Mock()
+        with patch("app.Gtk.Dialog", return_value=dialog), patch("app.Gtk.Image.new_from_pixbuf"), \
+             patch("app.Gtk.Label"), patch("app.encode_qr", wraps=__import__("qr").encode_qr) as encode:
+            editor.show_qr()
+        encode.assert_called_once_with("active note")
+        dialog.run.assert_called_once()
+        dialog.destroy.assert_called_once()
+
+    def test_qr_reports_empty_and_oversize_notes_without_modifying_them(self):
+        for text in ("", "a" * 2332):
+            with self.subTest(text_length=len(text)):
+                self.editor.buffer.set_text(text)
+                dialog = Mock()
+                with patch("app.Gtk.MessageDialog", return_value=dialog):
+                    self.editor.show_qr()
+                dialog.format_secondary_text.assert_called_once()
+                dialog.destroy.assert_called_once()
+                self.assertEqual(self.editor.text(), text)
+
     def clear_idle(self):
-        for name in ("style_source", "scroll_source", "save_source"):
+        for name in ("style_source", "scroll_source", "cursor_source", "save_source"):
             if getattr(self.editor, name):
                 GLib.source_remove(getattr(self.editor, name))
                 setattr(self.editor, name, 0)
@@ -501,7 +551,68 @@ class EditingTests(unittest.TestCase):
         strike = self.editor.buffer.get_tag_table().lookup("strikethrough")
         self.assertTrue(self.editor.buffer.get_iter_at_offset(3).has_tag(strike))
         self.editor.undo()
-        self.assertEqual(self.editor.text(), "- [ ] done")
+        self.assertEqual(self.editor.text(), "☐ done")
+
+    def test_typed_task_prefix_turns_into_a_box_before_enter(self):
+        for char in "- [ ] task":
+            self.type_text(char, flush=False)
+        self.assertEqual(self.editor.text(), "☐ task")
+        self.assertTrue(self.enter())
+        self.assertEqual(self.editor.text(), "☐ task\n☐ ")
+
+    def test_spaced_checked_prefix_becomes_checked_and_continues_unchecked(self):
+        for char in "- [ x ] task":
+            self.type_text(char, flush=False)
+        self.assertEqual(self.editor.text(), "☑ task")
+        self.assertTrue(self.enter())
+        self.assertEqual(self.editor.text(), "☑ task\n☐ ")
+
+    def test_empty_typed_task_survives_enter_and_ends_on_a_plain_line(self):
+        for char in "- [ ]":
+            self.type_text(char, flush=False)
+        self.assertEqual(self.editor.text(), "☐ ")
+        self.assertTrue(self.enter())
+        self.assertEqual(self.editor.text(), "☐ \n")
+        self.assertEqual(self.editor.buffer.get_iter_at_mark(self.editor.buffer.get_insert()).get_offset(), 3)
+        self.editor.undo()
+        self.assertEqual(self.editor.text(), "☐ ")
+
+    def test_typed_closing_bracket_conversion_is_one_undo_action(self):
+        self.type_text("- [ ", flush=False)
+        self.type_text("]", flush=False)
+        self.assertEqual(self.editor.text(), "☐ ")
+        self.editor.undo()
+        self.assertEqual(self.editor.text(), "- [ ")
+        self.editor.undo(redo=True)
+        self.assertEqual(self.editor.text(), "☐ ")
+
+    def test_old_raw_task_is_converted_on_enter(self):
+        for raw, expected in (("- [ ] task", "☐ task\n☐ "),
+                              ("- [ x ] task", "☑ task\n☐ "), ("- [ ]", "☐ \n")):
+            note = self.store.create_note(text=raw)
+            self.editor.activate_note(note)
+            self.editor.buffer.place_cursor(self.editor.buffer.get_end_iter())
+            self.assertTrue(self.enter())
+            self.assertEqual(self.editor.text(), expected)
+
+    def test_task_conversion_works_without_a_user_action_and_keeps_insert_iterator_valid(self):
+        location = self.editor.buffer.get_start_iter()
+        self.editor.buffer.insert(location, "- [ x ] task")
+        self.assertEqual(self.editor.text(), "☑ task")
+        self.assertEqual(location.get_offset(), len("☑ task"))
+        self.assertEqual(self.editor.history[self.editor.history_index][0], "☑ task")
+
+    def test_pasted_checklists_normalize_all_lines_in_one_undo_action(self):
+        self.type_text("- [ ] first\n- [ x ] second\nplain", flush=False)
+        self.assertEqual(self.editor.text(), "☐ first\n☑ second\nplain")
+        self.editor.undo()
+        self.assertEqual(self.editor.text(), "")
+        self.editor.undo(redo=True)
+        self.assertEqual(self.editor.text(), "☐ first\n☑ second\nplain")
+
+    def test_checkbox_like_text_inside_a_sentence_stays_literal(self):
+        self.type_text("use - [ x ] as an example")
+        self.assertEqual(self.editor.text(), "use - [ x ] as an example")
 
     def test_list_shortcuts_handle_shifted_key_symbols(self):
         self.type_text("item")
@@ -830,7 +941,18 @@ class WindowTests(unittest.TestCase):
                 finally:
                     reopened.destroy()
                 window.open_note(original)
+                self.assertEqual(window.qr_button.get_parent(), window.footer)
+                self.assertEqual(window.settings_button.get_parent(), window.footer)
+                self.assertEqual(window.qr_button.get_tooltip_text(), "Generate QR code")
+                window.show_settings()
+                widgets = list(descendants(window.popovers[0]))
+                self.assertEqual(len([w for w in widgets if isinstance(w, Gtk.Scale)]), 1)
+                self.assertEqual(len([w for w in widgets if isinstance(w, Gtk.CheckButton)
+                                     and w.get_label() == "Hide Markdown markers"]), 1)
                 window.show_formatting()
+                self.assertFalse(any(isinstance(w, Gtk.CheckButton) and
+                                     w.get_label() == "Hide Markdown markers"
+                                     for w in descendants(window.popovers[0])))
                 window.show_info()
                 self.assertIsInstance(window.get_titlebar(), Gtk.HeaderBar)
                 self.assertFalse(window.get_titlebar().get_property("decoration-layout-set"))
@@ -859,6 +981,13 @@ class WindowTests(unittest.TestCase):
                 window.open_note(note_id)
                 self.assertEqual(window.text(), "hello **world**")
                 self.assertEqual(window.title_entry.get_text(), "renamed")
+                self.assertEqual(window.new_button.get_tooltip_text(), "New note")
+                self.assertEqual(window.new_button.get_parent().get_parent(), window.get_titlebar())
+                before = window.note["id"]
+                window.new_button.clicked()
+                self.assertNotEqual(window.note["id"], before)
+                window.show_open_menu()
+                self.assertFalse(hasattr(window, "split_container"))
                 self.assertFalse(window.close_requested())
             finally:
                 window.destroy()
@@ -923,7 +1052,7 @@ class LifecycleTests(unittest.TestCase):
         window = SimpleNamespace(
             titlebar_background=Mock(), system_theme=Mock(), update_worker=Mock(),
             update_source=0, update_repeat_source=0, geometry_source=10, style_source=11,
-            scroll_source=12, save_source=13, recovery_source=14,
+            scroll_source=12, cursor_source=0, save_source=13, recovery_source=14,
             popovers=[Mock()], style_dirty=(object(), object()),
             buffer=Mock(), buffer_handlers=[21, 22, 23],
             tab_states={"note": {"history": ["big text"]}}, history=["text"],
@@ -943,3 +1072,44 @@ class LifecycleTests(unittest.TestCase):
         self.assertFalse(window.history)
         self.assertFalse(window.buffer_handlers)
         remove_css.assert_called_once()
+
+
+@unittest.skipIf(Editor is None, "System GTK unavailable")
+class CursorSpacingTests(unittest.TestCase):
+    def window(self, y=380, height=20):
+        view = Mock()
+        view.get_realized.return_value = True
+        view.has_focus.return_value = True
+        view.get_iter_location.return_value = SimpleNamespace(y=y, height=height)
+        view.get_visible_rect.return_value = SimpleNamespace(y=0, height=400)
+        view.get_pixels_above_lines.return_value = 5
+        view.get_pixels_below_lines.return_value = 5
+        view.get_bottom_margin.return_value = 16
+        return SimpleNamespace(note={"id": "current"}, cursor_source=42, view=view, buffer=Mock())
+
+    def test_bottom_cursor_has_one_line_of_space(self):
+        window = self.window()
+        Editor.keep_cursor_visible(window, "current")
+        window.view.set_bottom_margin.assert_called_once_with(30)
+        window.view.scroll_to_mark.assert_called_once_with(window.buffer.get_insert(), .075, False, 0, 0)
+        self.assertEqual(window.cursor_source, 0)
+
+    def test_no_scroll_when_cursor_already_has_room(self):
+        window = self.window(y=100)
+        Editor.keep_cursor_visible(window, "current")
+        window.view.scroll_to_mark.assert_not_called()
+
+    def test_padding_scales_with_large_font_and_small_viewport(self):
+        window = self.window(y=330, height=60)
+        window.view.get_visible_rect.return_value.height = 100
+        Editor.keep_cursor_visible(window, "current")
+        window.view.set_bottom_margin.assert_called_once_with(70)
+        self.assertEqual(window.view.scroll_to_mark.call_args.args[1], .45)
+
+    def test_does_not_move_inactive_tabs_or_unfocused_editor(self):
+        window = self.window()
+        Editor.keep_cursor_visible(window, "old tab")
+        window.view.scroll_to_mark.assert_not_called()
+        window.view.has_focus.return_value = False
+        Editor.keep_cursor_visible(window, "current")
+        window.view.scroll_to_mark.assert_not_called()

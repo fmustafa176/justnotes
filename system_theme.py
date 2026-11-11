@@ -1,5 +1,7 @@
 """Follow the desktop's optional, local XDG appearance portal."""
 
+import os
+
 import gi
 
 gi.require_version("Gtk", "3.0")
@@ -84,19 +86,34 @@ class SystemTheme:
         self.changed = None
 
 
+def initial_color_scheme():
+    """Read GNOME's local preference before creating widgets; portal stays authoritative."""
+    if "gnome" not in os.environ.get("XDG_CURRENT_DESKTOP", "").lower().split(":"):
+        return None
+    source = Gio.SettingsSchemaSource.get_default()
+    schema = source.lookup("org.gnome.desktop.interface", True) if source else None
+    if schema is None or not schema.has_key("color-scheme"):
+        return None
+    settings = Gio.Settings.new_full(schema, None, None)
+    return {"prefer-dark": True, "prefer-light": False}.get(settings.get_string("color-scheme"))
+
+
 def follow_system(settings, system_dark=None):
-    # Release old per-application overrides, then honor only a desktop-provided
-    # color-scheme preference. GTK supplies the rest of the installed theme.
-    settings.reset_property("gtk-application-prefer-dark-theme")
-    if system_dark is not None:
-        settings.set_property("gtk-application-prefer-dark-theme", system_dark)
+    # Changing a GTK setting restyles every widget. Apply a portal value directly
+    # instead of briefly resetting to the opposite scheme and then changing back.
+    key = "gtk-application-prefer-dark-theme"
+    if system_dark is None:
+        settings.reset_property(key)
+    elif settings.get_property(key) != system_dark:
+        settings.set_property(key, system_dark)
 
 
 class TitlebarBackground:
-    """Use native theme colors for the translucent frame around the editor."""
+    """Tint the translucent frame black while keeping native window controls."""
 
-    def __init__(self, titlebar, shell=None, translucent=True):
+    def __init__(self, titlebar, shell=None, translucent=True, transparency=40):
         self.translucent = translucent
+        self.transparency = transparency
         self.shell_context = shell.get_style_context() if shell is not None else None
         self.titlebar = titlebar
         self.context = titlebar.get_style_context()
@@ -146,7 +163,7 @@ class TitlebarBackground:
         self.pending = 0
         if self.closed:
             return GLib.SOURCE_REMOVE
-        css = titlebar_stylesheet(self.native_color(), self.translucent)
+        css = titlebar_stylesheet(self.native_color(), self.translucent, self.transparency)
         # Loading a provider may emit style-updated; don't create a redraw loop.
         if css != self.last_css:
             self.last_css = css

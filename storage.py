@@ -67,6 +67,8 @@ class Store:
                 and all(isinstance(key, str) and re.fullmatch(r"[0-9a-f]{32}", key)
                         for key in value.get("open_tabs", []))
                 and len(value.get("open_tabs", [])) == len(set(value.get("open_tabs", [])))
+                and type(value.get("transparency", 40)) is int
+                and 0 <= value.get("transparency", 40) <= 100
                 and isinstance(value.get("hide_markers", True), bool)
                 and (value.get("font") is None or
                      isinstance(value["font"], str) and 0 < len(value["font"]) <= 512
@@ -130,6 +132,14 @@ class Store:
                 except (OSError, ValueError):
                     self._read(backup, validate)  # Require a valid recovery copy.
                 else:
+                    if previous == value:
+                        # Opening the same note or window must not sync unchanged
+                        # preferences again. Keep a valid recovery copy as well.
+                        try:
+                            self._read(backup, validate)
+                        except (OSError, ValueError):
+                            self._replace(backup, data)
+                        return
                     self._replace(backup, (json.dumps(previous, ensure_ascii=False, indent=2) + "\n").encode("utf-8"))
             elif not backup.exists():
                 self._replace(backup, data)
@@ -226,12 +236,13 @@ class Store:
         path = self.root / "preferences.json"
         if not path.exists() and not path.with_suffix(".json.bak").exists():
             return dict(version=1, editor_theme="light", width=960, height=600, last_note=None, font=None,
-                        hide_markers=True, open_tabs=[], always_show_tabs=False)
+                        hide_markers=True, transparency=40, open_tabs=[], always_show_tabs=False)
         preferences = self._load(path, self._preferences)
         legacy_theme = preferences.pop("theme", None)
         preferences.setdefault("editor_theme", legacy_theme if legacy_theme in ("light", "dark") else "light")
         preferences.setdefault("font", None)
         preferences.setdefault("hide_markers", True)
+        preferences.setdefault("transparency", 40)
         preferences.setdefault("open_tabs", [])
         preferences.setdefault("always_show_tabs", False)
         return preferences

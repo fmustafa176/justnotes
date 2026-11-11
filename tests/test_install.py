@@ -37,7 +37,7 @@ class InstallationTests(unittest.TestCase):
             self.assertTrue((data / "justnotes/application/system_theme.py").is_file())
             installed = data / "justnotes/application"
             self.assertTrue((installed / ".update-revision").is_file())
-            for filename in ("app.py", "appearance.py", "system_theme.py", "storage.py", "formatting.py", "updates.py"):
+            for filename in ("app.py", "appearance.py", "system_theme.py", "storage.py", "formatting.py", "updates.py", "qr.py"):
                 self.assertEqual((installed / filename).read_bytes(), (source / filename).read_bytes())
             # Exercise the installed controller, not modules imported from the
             # source tree: this catches testing a different copy than we ship.
@@ -47,6 +47,9 @@ from unittest.mock import Mock, patch
 assert not hasattr(app.Editor, "toggle_theme")
 assert not hasattr(app.Editor, "show_themes")
 assert hasattr(app.Editor, "toggle_editor_theme")
+from qr import encode_qr
+assert len(encode_qr("installed QR")) == 21
+assert (app.Path(app.__file__).parent / "assets/qr-code-symbolic.svg").is_file()
 view = SimpleNamespace(preferences={"font": None, "editor_theme": "light"},
                        css=app.Gtk.CssProvider(), marker_tag=app.Gtk.TextTag(), theme_button=Mock())
 with patch("app.Gtk.Settings.get_default") as settings:

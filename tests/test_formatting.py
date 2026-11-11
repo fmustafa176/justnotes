@@ -131,8 +131,10 @@ class ListFormattingTests(unittest.TestCase):
 
     def test_enter_leaves_empty_items(self):
         from formatting import list_enter
-        for line in ("• ", "10. ", "☐ ", "  - [ ]  "):
+        for line in ("• ", "10. "):
             self.assertEqual(list_enter(line, len(line)), (0, len(line), ""))
+        for line in ("☐ ", "  - [ ]  "):
+            self.assertEqual(list_enter(line, len(line)), (len(line), len(line), "\n"))
 
     def test_tasks_toggle_markdown_and_unicode_forms(self):
         from formatting import toggle_task
@@ -149,3 +151,19 @@ class ListFormattingTests(unittest.TestCase):
         self.assertIn(("bold", 4, 8), found)
         self.assertNotIn(("marker", 0, 2), found)
         self.assertEqual(len([tag for tag, _, _ in found if tag == "list"]), 3)
+
+
+class TypedTaskTests(unittest.TestCase):
+    def test_checkbox_prefixes_with_spaces_are_accepted(self):
+        from formatting import task_prefix
+        for raw in ("- [ ]", "- [  ] ", "[ ] ", "- [] "):
+            self.assertEqual(task_prefix(raw), (0, len(raw), "☐ "))
+        for raw in ("- [x] ", "- [ x ] ", "- [ X ] "):
+            self.assertEqual(task_prefix(raw), (0, len(raw), "☑ "))
+        self.assertIsNone(task_prefix("a - [x] task"))
+        self.assertIsNone(task_prefix("- [maybe] task"))
+
+    def test_spaced_checked_markers_get_completed_styling(self):
+        from formatting import toggle_task
+        self.assertEqual(toggle_task("- [ x ] task"), (0, 8, "☐ "))
+        self.assertIn(("strikethrough", 8, 12), list(spans("- [ x ] task")))

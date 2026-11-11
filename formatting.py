@@ -23,7 +23,7 @@ class Inline:
 _DELIMITERS = re.compile(r"\*+|~+")
 
 _LIST = re.compile(
-    r"^(?P<indent>[ \t]*)(?:(?P<task>(?:[-+*][ \t]+)?\[(?P<checked>[ xX])\]|[☐☑☒])"
+    r"^(?P<indent>[ \t]*)(?:(?P<task>(?:[-+*][ \t]+)?\[(?P<checked>[ \t]*[xX]?[ \t]*)\]|[☐☑☒])"
     r"|(?P<number>[0-9]{1,9})(?P<delimiter>[.)])|(?P<bullet>[-+*•]))[ \t]+", re.MULTILINE)
 
 
@@ -170,7 +170,7 @@ def list_kind(match):
 
 
 def task_checked(match):
-    return match["checked"] in ("x", "X") or match["task"] in ("☑", "☒")
+    return (match["checked"] or "").strip().lower() == "x" or match["task"] in ("☑", "☒")
 
 
 def list_edit(text, start, end, kind):
@@ -213,9 +213,11 @@ def list_enter(line, cursor):
     match = _LIST.match(line)
     if not match or cursor < match.end():
         return None
-    if not line[match.end():].strip():
-        return 0, len(line), ""
     kind = list_kind(match)
+    if not line[match.end():].strip():
+        # An empty task is still an item the user created. Keep its box and
+        # leave the list on the following plain line instead of deleting it.
+        return (cursor, cursor, "\n") if kind == "task" else (0, len(line), "")
     marker = "☐ " if kind == "task" else (f"{int(match['number']) + 1}{match['delimiter']} "
                                          if kind == "number" else match["bullet"] + " ")
     return cursor, cursor, "\n" + match["indent"] + marker
@@ -227,3 +229,19 @@ def toggle_task(line):
         return None
     prefix = match["indent"] + ("☐ " if task_checked(match) else "☑ ")
     return 0, match.end(), prefix
+
+
+_TYPED_TASK = re.compile(r"^(?P<indent>[ \t]*)(?:[-+*][ \t]+)?"
+                         r"\[[ \t]*(?P<checked>[xX]?)[ \t]*\](?:[ \t]+|$)")
+_TASK_SPACING = re.compile(r"^(?P<indent>[ \t]*)(?P<box>[☐☑☒])[ \t]{2,}")
+
+
+def task_prefix(line):
+    """Turn a completed typed checkbox prefix into its visible text symbol."""
+    match = _TYPED_TASK.match(line)
+    if match:
+        return 0, match.end(), match["indent"] + ("☑ " if match["checked"] else "☐ ")
+    spacing = _TASK_SPACING.match(line)
+    if spacing:
+        return 0, spacing.end(), spacing["indent"] + spacing["box"] + " "
+    return None

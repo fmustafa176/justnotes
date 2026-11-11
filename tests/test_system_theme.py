@@ -3,7 +3,7 @@ from unittest.mock import Mock
 from types import SimpleNamespace
 
 try:
-    from system_theme import SystemTheme, TitlebarBackground, follow_system, GLib, Gtk
+    from system_theme import SystemTheme, TitlebarBackground, follow_system, initial_color_scheme, GLib, Gtk
 except ImportError:
     SystemTheme = None
 
@@ -34,6 +34,32 @@ class SystemThemeTests(unittest.TestCase):
         settings.set_property.assert_called_with("gtk-application-prefer-dark-theme", True)
         follow_system(settings, False)
         settings.set_property.assert_called_with("gtk-application-prefer-dark-theme", False)
+
+    def test_portal_does_not_toggle_scheme_when_it_matches_startup(self):
+        settings = Mock()
+        settings.get_property.return_value = True
+        follow_system(settings, True)
+        settings.reset_property.assert_not_called()
+        settings.set_property.assert_not_called()
+        follow_system(settings, False)
+        settings.set_property.assert_called_once_with("gtk-application-prefer-dark-theme", False)
+        settings.reset_property.assert_not_called()
+
+    def test_startup_reads_gnome_preference_without_overriding_other_desktops(self):
+        from unittest.mock import patch
+        settings = Mock()
+        with patch.dict("os.environ", {"XDG_CURRENT_DESKTOP": "ubuntu:GNOME"}), \
+             patch("system_theme.Gio.SettingsSchemaSource.get_default") as source, \
+             patch("system_theme.Gio.Settings.new_full", return_value=settings):
+            for value, expected in (("prefer-dark", True), ("prefer-light", False), ("default", None)):
+                settings.get_string.return_value = value
+                self.assertIs(initial_color_scheme(), expected)
+            source.return_value.lookup.return_value = None
+            self.assertIsNone(initial_color_scheme())
+        with patch.dict("os.environ", {"XDG_CURRENT_DESKTOP": "KDE"}), \
+             patch("system_theme.Gio.SettingsSchemaSource.get_default") as source:
+            self.assertIsNone(initial_color_scheme())
+            source.assert_not_called()
 
     def test_live_changes_and_unspecified_preferences(self):
         watcher = self.watcher()
@@ -88,21 +114,22 @@ class TitlebarBackgroundTests(unittest.TestCase):
         self.effect = TitlebarBackground(self.titlebar)
         self.addCleanup(self.effect.close)
 
-    def test_only_background_alpha_changes_not_native_buttons_or_widget_opacity(self):
-        self.assertIn("rgba(51, 102, 153, 0.8400)", self.effect.last_css)
+    def test_black_translucent_background_keeps_native_buttons_and_full_widget_opacity(self):
+        self.assertIn("rgba(0, 0, 0, 0.6000)", self.effect.last_css)
         self.assertNotIn("button", self.effect.last_css)
         self.assertNotIn("opacity", self.effect.last_css)
         self.titlebar.set_opacity.assert_not_called()
         self.titlebar.get_style_context().get_background_color.assert_not_called()
         self.assertTrue(self.effect.provider.to_string())
 
-    def test_theme_changes_use_new_native_color_not_previous_tint(self):
+    def test_translucent_frame_stays_black_across_native_theme_changes(self):
         self.native.get_background_color.return_value = SimpleNamespace(red=1, green=1, blue=1, alpha=1)
         self.effect.refresh()
-        self.assertIn("rgba(255, 255, 255, 0.8400)", self.effect.last_css)
+        self.assertIn("rgba(0, 0, 0, 0.6000)", self.effect.last_css)
 
-    def test_themes_with_more_transparency_keep_it(self):
+    def test_slider_controls_alpha_independently_of_theme_alpha(self):
         self.native.get_background_color.return_value = SimpleNamespace(red=0, green=0, blue=0, alpha=0.4)
+        self.effect.transparency = 60
         self.effect.refresh()
         self.assertIn("rgba(0, 0, 0, 0.4000)", self.effect.last_css)
 
@@ -110,7 +137,13 @@ class TitlebarBackgroundTests(unittest.TestCase):
         self.native.get_background_color.return_value = SimpleNamespace(red=0, green=0, blue=0, alpha=0)
         self.native.lookup_color.return_value = (True, SimpleNamespace(red=1, green=1, blue=1, alpha=1))
         self.effect.refresh()
-        self.assertIn("rgba(255, 255, 255, 0.8400)", self.effect.last_css)
+        self.assertIn("rgba(0, 0, 0, 0.6000)", self.effect.last_css)
+
+    def test_slider_endpoints_and_live_changes(self):
+        for value, alpha in ((0, "1.0000"), (100, "0.0000"), (73, "0.2700")):
+            self.effect.transparency = value
+            self.effect.refresh()
+            self.assertIn(f"rgba(0, 0, 0, {alpha})", self.effect.last_css)
 
     def test_own_style_updates_do_not_reload_css_indefinitely(self):
         from unittest.mock import patch
